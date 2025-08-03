@@ -2,8 +2,9 @@
 #include <TFT_eSPI.h>
 #include "weather_images.h"
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+//#include <HTTPClient.h>
+//#include <ArduinoJson.h>
+#include <DHT.h>
 
 // Replace with your network credentials
 const char* ssid = "Fibertel WiFi867 2.4GHz";
@@ -37,6 +38,12 @@ String weather_description;
   const char degree_symbol[] = "\u00B0F";
 #endif
 
+// DHT sensor setup (if needed, not used in this example)
+#define DHTPIN 4           // Cambiá esto al pin que uses
+#define DHTTYPE DHT22
+// Initialize DHT sensor
+DHT dht(DHTPIN, DHTTYPE);
+
 // Screen dimensions
 //#define SCREEN_WIDTH 240
 //#define SCREEN_HEIGHT 320
@@ -46,15 +53,12 @@ String weather_description;
 #define DRAW_BUF_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT / 10 * (LV_COLOR_DEPTH / 8))
 uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 
+// Forward declarations
 void get_weather_description(int code);
 void get_weather_data();
-
-// If logging is enabled, it will inform the user about what is happening in the library
-void log_print(lv_log_level_t level, const char * buf) {
-  LV_UNUSED(level);
-  Serial.println(buf);
-  Serial.flush();
-}
+void log_print(lv_log_level_t level, const char * buf);
+static void timer_cb(lv_timer_t * timer);
+void lv_create_main_gui(void);
 
 static lv_obj_t * weather_image;
 static lv_obj_t * text_label_date;
@@ -63,15 +67,42 @@ static lv_obj_t * text_label_humidity;
 static lv_obj_t * text_label_weather_description;
 static lv_obj_t * text_label_time_location;
 
-static void timer_cb(lv_timer_t * timer){
-  LV_UNUSED(timer);
-  get_weather_data();
-  get_weather_description(weather_code);
-  lv_label_set_text(text_label_date, current_date.c_str());
-  lv_label_set_text(text_label_temperature, String("      " + temperature + degree_symbol).c_str());
-  lv_label_set_text(text_label_humidity, String("   " + humidity + "%").c_str());
-  lv_label_set_text(text_label_weather_description, weather_description.c_str());
-  lv_label_set_text(text_label_time_location, String("Last Update: " + last_weather_update + "  |  " + location).c_str());
+void setup() {
+  String LVGL_Arduino = String("LVGL Library Version: ") + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
+  Serial.begin(115200);
+  Serial.println(LVGL_Arduino);
+  // Initialize DHT sensor
+  dht.begin();
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.print("\nConnected to Wi-Fi network with IP Address: ");
+  Serial.println(WiFi.localIP());
+  
+  // Start LVGL
+  lv_init();
+  // Register print function for debugging
+  lv_log_register_print_cb(log_print);
+
+  // Create a display object
+  lv_display_t * disp;
+  // Initialize the TFT display using the TFT_eSPI library
+  disp = lv_tft_espi_create(SCREEN_WIDTH, SCREEN_HEIGHT, draw_buf, sizeof(draw_buf));
+  lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
+  
+  // Function to draw the GUI
+  lv_create_main_gui();
+}
+
+void loop() {
+  lv_task_handler();  // let the GUI do its work
+  lv_tick_inc(5);     // tell LVGL how much time has passed
+  delay(5);           // let this time pass
 }
 
 void lv_create_main_gui(void) {
@@ -126,8 +157,31 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_text_font((lv_obj_t*) text_label_time_location, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color((lv_obj_t*) text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
-  lv_timer_t * timer = lv_timer_create(timer_cb, 600000, NULL);
+  // Create a timer to update the weather data every 30 seconds
+  lv_timer_t * timer = lv_timer_create(timer_cb, 30000, NULL);
   lv_timer_ready(timer);
+}
+// Function to get weather data from the API
+// This function fetches the weather data from the Open-Meteo API
+void get_weather_data() {
+  float t = dht.readTemperature();   // Lee temperatura en °C
+  float h = dht.readHumidity();      // Lee humedad en %
+
+  if (isnan(t) || isnan(h)) {
+    Serial.println("Error al leer del sensor DHT22");
+    return;
+  }
+
+  temperature = String(t, 1);  // Un decimal
+  humidity = String(h, 1);
+
+  // Simulación de valores por defecto
+  is_day = 1;               // 1 = día, 0 = noche (podés usar sensor de luz si querés más adelante)
+  weather_code = 0;         // Usamos 0 para "CLEAR SKY"
+  last_weather_update = "Local";  // Texto que muestra el origen de datos
+
+  // Fecha fija o simulada
+  current_date = "2025-08-03";  // Podés actualizar esto con un RTC o NTP en el futuro
 }
 
 /*
@@ -268,89 +322,20 @@ void get_weather_description(int code) {
   }
 }
 
-void get_weather_data() {
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    // Construct the API endpoint
-    String url = String("http://api.open-meteo.com/v1/forecast?latitude=" + latitude + "&longitude=" + longitude + "&current=temperature_2m,relative_humidity_2m,is_day,precipitation,rain,weather_code" + temperature_unit + "&timezone=" + timezone + "&forecast_days=1");
-    http.begin(url);
-    int httpCode = http.GET(); // Make the GET request
-
-    if (httpCode > 0) {
-      // Check for the response
-      if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-        //Serial.println("Request information:");
-        //Serial.println(payload);
-        // Parse the JSON to extract the time
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, payload);
-        if (!error) {
-          const char* datetime = doc["current"]["time"];
-          temperature = String(doc["current"]["temperature_2m"].as<float>());
-          humidity = String(doc["current"]["relative_humidity_2m"].as<int>());
-          is_day = doc["current"]["is_day"].as<int>();
-          weather_code = doc["current"]["weather_code"].as<int>();
-
-          /*Serial.println(temperature);
-          Serial.println(humidity);
-          Serial.println(is_day);
-          Serial.println(weather_code);
-          Serial.println(String(timezone));*/
-          // Split the datetime into date and time
-          String datetime_str = String(datetime);
-          int splitIndex = datetime_str.indexOf('T');
-          current_date = datetime_str.substring(0, splitIndex);
-          last_weather_update = datetime_str.substring(splitIndex + 1, splitIndex + 9); // Extract time portion
-        } else {
-          Serial.print("deserializeJson() failed: ");
-          Serial.println(error.c_str());
-        }
-      }
-      else {
-        Serial.println("Failed");
-      }
-    } else {
-      Serial.printf("GET request failed, error: %s\n", http.errorToString(httpCode).c_str());
-    }
-    http.end(); // Close connection
-  } else {
-    Serial.println("Not connected to Wi-Fi");
-  }
+// If logging is enabled, it will inform the user about what is happening in the library
+void log_print(lv_log_level_t level, const char * buf) {
+  LV_UNUSED(level);
+  Serial.println(buf);
+  Serial.flush();
 }
 
-void setup() {
-  String LVGL_Arduino = String("LVGL Library Version: ") + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
-  Serial.begin(115200);
-  Serial.println(LVGL_Arduino);
-
-  // Connect to Wi-Fi
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.print("\nConnected to Wi-Fi network with IP Address: ");
-  Serial.println(WiFi.localIP());
-  
-  // Start LVGL
-  lv_init();
-  // Register print function for debugging
-  lv_log_register_print_cb(log_print);
-
-  // Create a display object
-  lv_display_t * disp;
-  // Initialize the TFT display using the TFT_eSPI library
-  disp = lv_tft_espi_create(SCREEN_WIDTH, SCREEN_HEIGHT, draw_buf, sizeof(draw_buf));
-  lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
-  
-  // Function to draw the GUI
-  lv_create_main_gui();
-}
-
-void loop() {
-  lv_task_handler();  // let the GUI do its work
-  lv_tick_inc(5);     // tell LVGL how much time has passed
-  delay(5);           // let this time pass
+static void timer_cb(lv_timer_t * timer){
+  LV_UNUSED(timer);
+  get_weather_data();
+  get_weather_description(weather_code);
+  lv_label_set_text(text_label_date, current_date.c_str());
+  lv_label_set_text(text_label_temperature, String("      " + temperature + degree_symbol).c_str());
+  lv_label_set_text(text_label_humidity, String("   " + humidity + "%").c_str());
+  lv_label_set_text(text_label_weather_description, weather_description.c_str());
+  lv_label_set_text(text_label_time_location, String("Last Update: " + last_weather_update + "  |  " + location).c_str());
 }
