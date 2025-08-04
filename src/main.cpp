@@ -1,9 +1,10 @@
 #include <lvgl.h>
 #include <TFT_eSPI.h>
-#include "weather_images.h"
+#include "aqs_images.h"
 #include <WiFi.h>
 #include <DHT.h>
 #include <time.h>
+#include <XPT2046_Touchscreen.h>
 
 // Replace with your network credentials
 const char* ssid = "Fibertel WiFi867 2.4GHz";
@@ -13,14 +14,15 @@ const char* password = "0043559168";
 String location = "Bahia Blanca";
 
 // Store date and time
-String current_date;
-//String last_weather_update;
 String temperature;
 String humidity;
 String monoxide;
-int is_day;
-int weather_code = 0;
-String weather_description;
+//int is_day;
+//int weather_code = 0;
+//String weather_description;
+
+// Define the pin for the buzzer
+#define BUZZER_PIN 23
 
 // SET VARIABLE TO 0 FOR TEMPERATURE IN FAHRENHEIT DEGREES
 #define TEMP_CELSIUS 1
@@ -53,19 +55,26 @@ void log_print(lv_log_level_t level, const char * buf);
 static void timer_cb(lv_timer_t * timer);
 void lv_create_main_gui(void);
 String get_formatted_datetime();
+static void alert_blink_cb(lv_timer_t * timer);
+void touchscreen_event_cb(lv_event_t * e);
 
-static lv_obj_t * weather_image;
-static lv_obj_t * text_label_date;
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
-static lv_obj_t * text_label_weather_description;
 static lv_obj_t * text_label_time_location;
 static lv_obj_t * text_label_ppm; // Label for monoxide value
+static lv_obj_t * screen_bg;
+static lv_obj_t * image_status_icon;  // Ícono dinámico: cleanair o alert
+static bool alert_blink_state = false;
+static bool alert_active = false;
 
 void setup() {
   String LVGL_Arduino = String("LVGL Library Version: ") + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
   Serial.begin(115200);
   Serial.println(LVGL_Arduino);
+
+  // Initialize Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
   // Initialize DHT sensor
   dht.begin();
 
@@ -104,29 +113,33 @@ void loop() {
 }
 
 void lv_create_main_gui(void) {
-  LV_IMAGE_DECLARE(image_weather_sun);
-  LV_IMAGE_DECLARE(image_weather_cloud);
-  LV_IMAGE_DECLARE(image_weather_rain);
-  LV_IMAGE_DECLARE(image_weather_thunder);
-  LV_IMAGE_DECLARE(image_weather_snow);
-  LV_IMAGE_DECLARE(image_weather_night);
+
   LV_IMAGE_DECLARE(image_weather_temperature);
   LV_IMAGE_DECLARE(image_weather_humidity);
   LV_IMAGE_DECLARE(image_monoxide);
+  LV_IMAGE_DECLARE(image_cleanair);
+  LV_IMAGE_DECLARE(image_warning);
+  LV_IMAGE_DECLARE(image_alert);
 
   // Get weather data from DHT sensor
   get_weather_data();
 
-  weather_image = lv_image_create(lv_screen_active());
-  lv_obj_align(weather_image, LV_ALIGN_CENTER, -80, -20);
-  
-  get_weather_description(weather_code);
+  // ---------- FONDO CON BORDE Y SOMBRA VERDE ----------
+  screen_bg = lv_obj_create(lv_screen_active());
+  lv_obj_set_size(screen_bg, lv_obj_get_width(lv_screen_active()), lv_obj_get_height(lv_screen_active()));
+  lv_obj_center(screen_bg);
+  lv_obj_set_style_radius(screen_bg, 0, 0);
+  lv_obj_set_style_bg_opa(screen_bg, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(screen_bg, 4, 0);
+  lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
+  lv_obj_set_style_shadow_width(screen_bg, 15, 0);
+  lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
+  lv_obj_set_style_shadow_spread(screen_bg, 0, 0);
 
-  text_label_date = lv_label_create(lv_screen_active());
-  lv_label_set_text(text_label_date, current_date.c_str());
-  lv_obj_align(text_label_date, LV_ALIGN_CENTER, 70, -125);
-  lv_obj_set_style_text_font((lv_obj_t*) text_label_date, &lv_font_montserrat_26, 0);
-  lv_obj_set_style_text_color((lv_obj_t*) text_label_date, lv_palette_main(LV_PALETTE_TEAL), 0);
+  // ---------- ÍCONO DE ESTADO ----------
+  image_status_icon = lv_image_create(lv_screen_active());
+  lv_image_set_src(image_status_icon, &image_cleanair);
+  lv_obj_align(image_status_icon, LV_ALIGN_CENTER, -80, -20);
 
   // Temperature Icon
   lv_obj_t * weather_image_temperature = lv_image_create(lv_screen_active());
@@ -163,19 +176,23 @@ void lv_create_main_gui(void) {
   String datetime_str = get_formatted_datetime() + " | " + location;
   lv_label_set_text(text_label_time_location, datetime_str.c_str());
   lv_obj_align(text_label_time_location, LV_ALIGN_BOTTOM_MID, 0, -10);
+
   lv_obj_set_style_text_font(text_label_time_location, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
   // Create a timer to update the weather data every 30 seconds
   lv_timer_t * timer = lv_timer_create(timer_cb, 30000, NULL);
   lv_timer_ready(timer);
+
+  // Timer para hacer parpadear el borde si hay alerta
+  lv_timer_create(alert_blink_cb, 500, NULL);  // cada 500 ms
 }
 
 // Function to get weather data from the DHT sensor
 void get_weather_data() {
   float t = dht.readTemperature();   // Lee temperatura en °C
   float h = dht.readHumidity();      // Lee humedad en %
-  float m = 35.0; // Simulación de valor de monóxido de carbono (MQ7) en ppm
+  float m = 150.0; // Simulación de valor de monóxido de carbono (MQ7) en ppm
 
   if (isnan(t) || isnan(h)) {
     Serial.println("Error al leer del sensor DHT22");
@@ -185,150 +202,6 @@ void get_weather_data() {
   temperature = String(t, 1);  // Un decimal
   humidity = String(h, 1);
   monoxide = String(m, 1); // Un decimal
-
-  // Simulación de valores por defecto
-  is_day = 1;               // 1 = día, 0 = noche (podés usar sensor de luz si querés más adelante)
-  weather_code = 0;         // Usamos 0 para "CLEAR SKY"
-  //last_weather_update = "Local";  // Texto que muestra el origen de datos
-
-}
-
-/*
-  WMO Weather interpretation codes (WW)- Code	Description
-  0	Clear sky
-  1, 2, 3	Mainly clear, partly cloudy, and overcast
-  45, 48	Fog and depositing rime fog
-  51, 53, 55	Drizzle: Light, moderate, and dense intensity
-  56, 57	Freezing Drizzle: Light and dense intensity
-  61, 63, 65	Rain: Slight, moderate and heavy intensity
-  66, 67	Freezing Rain: Light and heavy intensity
-  71, 73, 75	Snow fall: Slight, moderate, and heavy intensity
-  77	Snow grains
-  80, 81, 82	Rain showers: Slight, moderate, and violent
-  85, 86	Snow showers slight and heavy
-  95 *	Thunderstorm: Slight or moderate
-  96, 99 *	Thunderstorm with slight and heavy hail
-*/
-void get_weather_description(int code) {
-  switch (code) {
-    case 0:
-      if(is_day==1) { lv_image_set_src(weather_image, &image_weather_sun); }
-      else { lv_image_set_src(weather_image, &image_weather_night); }
-      weather_description = "CLEAR SKY";
-      break;
-    case 1: 
-      if(is_day==1) { lv_image_set_src(weather_image, &image_weather_sun); }
-      else { lv_image_set_src(weather_image, &image_weather_night); }
-      weather_description = "MAINLY CLEAR";
-      break;
-    case 2: 
-      lv_image_set_src(weather_image, &image_weather_cloud);
-      weather_description = "PARTLY CLOUDY";
-      break;
-    case 3:
-      lv_image_set_src(weather_image, &image_weather_cloud);
-      weather_description = "OVERCAST";
-      break;
-    case 45:
-      lv_image_set_src(weather_image, &image_weather_cloud);
-      weather_description = "FOG";
-      break;
-    case 48:
-      lv_image_set_src(weather_image, &image_weather_cloud);
-      weather_description = "DEPOSITING RIME FOG";
-      break;
-    case 51:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "DRIZZLE LIGHT INTENSITY";
-      break;
-    case 53:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "DRIZZLE MODERATE INTENSITY";
-      break;
-    case 55:
-      lv_image_set_src(weather_image, &image_weather_rain); 
-      weather_description = "DRIZZLE DENSE INTENSITY";
-      break;
-    case 56:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "FREEZING DRIZZLE LIGHT";
-      break;
-    case 57:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "FREEZING DRIZZLE DENSE";
-      break;
-    case 61:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "RAIN SLIGHT INTENSITY";
-      break;
-    case 63:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "RAIN MODERATE INTENSITY";
-      break;
-    case 65:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "RAIN HEAVY INTENSITY";
-      break;
-    case 66:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "FREEZING RAIN LIGHT INTENSITY";
-      break;
-    case 67:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "FREEZING RAIN HEAVY INTENSITY";
-      break;
-    case 71:
-      lv_image_set_src(weather_image, &image_weather_snow);
-      weather_description = "SNOW FALL SLIGHT INTENSITY";
-      break;
-    case 73:
-      lv_image_set_src(weather_image, &image_weather_snow);
-      weather_description = "SNOW FALL MODERATE INTENSITY";
-      break;
-    case 75:
-      lv_image_set_src(weather_image, &image_weather_snow);
-      weather_description = "SNOW FALL HEAVY INTENSITY";
-      break;
-    case 77:
-      lv_image_set_src(weather_image, &image_weather_snow);
-      weather_description = "SNOW GRAINS";
-      break;
-    case 80:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "RAIN SHOWERS SLIGHT";
-      break;
-    case 81:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "RAIN SHOWERS MODERATE";
-      break;
-    case 82:
-      lv_image_set_src(weather_image, &image_weather_rain);
-      weather_description = "RAIN SHOWERS VIOLENT";
-      break;
-    case 85:
-      lv_image_set_src(weather_image, &image_weather_snow);
-      weather_description = "SNOW SHOWERS SLIGHT";
-      break;
-    case 86:
-      lv_image_set_src(weather_image, &image_weather_snow);
-      weather_description = "SNOW SHOWERS HEAVY";
-      break;
-    case 95:
-      lv_image_set_src(weather_image, &image_weather_thunder);
-      weather_description = "THUNDERSTORM";
-      break;
-    case 96:
-      lv_image_set_src(weather_image, &image_weather_thunder);
-      weather_description = "THUNDERSTORM SLIGHT HAIL";
-      break;
-    case 99:
-      lv_image_set_src(weather_image, &image_weather_thunder);
-      weather_description = "THUNDERSTORM HEAVY HAIL";
-      break;
-    default: 
-      weather_description = "UNKNOWN WEATHER CODE";
-      break;
-  }
 }
 
 // If logging is enabled, it will inform the user about what is happening in the library
@@ -341,12 +214,27 @@ void log_print(lv_log_level_t level, const char * buf) {
 static void timer_cb(lv_timer_t * timer){
   LV_UNUSED(timer);
   get_weather_data();
-  get_weather_description(weather_code);
   
-  lv_label_set_text(text_label_date, current_date.c_str());
   lv_label_set_text(text_label_temperature, String("      " + temperature + degree_symbol).c_str());
   lv_label_set_text(text_label_humidity, String("   " + humidity + "%").c_str());
   lv_label_set_text(text_label_time_location, (get_formatted_datetime() + " | " + location).c_str());
+
+    // Verificar nivel de CO
+  float ppm = monoxide.toFloat();
+  if (ppm > 100.0) {
+    alert_active = true;
+    lv_image_set_src(image_status_icon, &image_alert);  // cambiar icono
+
+  } else {
+    if (alert_active) {
+      // solo si veníamos de alerta, restauramos
+      lv_image_set_src(image_status_icon, &image_cleanair);
+      lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
+      lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
+    }
+      alert_active = false;
+      alert_blink_state = false;
+  }
 }
 
 String get_formatted_datetime() {
@@ -359,3 +247,22 @@ String get_formatted_datetime() {
   strftime(buffer, sizeof(buffer), "%d/%m/%Y %H:%M", &timeinfo);
   return String(buffer);
 }
+
+static void alert_blink_cb(lv_timer_t * timer) {
+  LV_UNUSED(timer);
+  if (!alert_active) {
+    digitalWrite(BUZZER_PIN, LOW);  // asegurar apagado
+    return;
+  }
+
+  alert_blink_state = !alert_blink_state;
+
+  lv_color_t color = alert_blink_state ? lv_palette_main(LV_PALETTE_RED) : lv_color_black();
+  lv_obj_set_style_border_color(screen_bg, color, 0);
+  lv_obj_set_style_shadow_color(screen_bg, color, 0);
+
+  // Activar o desactivar el buzzer
+  digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+}
+
+
