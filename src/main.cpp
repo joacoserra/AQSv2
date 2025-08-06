@@ -17,12 +17,9 @@ String location = "Bahia Blanca";
 String temperature;
 String humidity;
 String monoxide;
-//int is_day;
-//int weather_code = 0;
-//String weather_description;
 
 // Define the pin for the buzzer
-#define BUZZER_PIN 23
+//#define BUZZER_PIN 23
 
 // SET VARIABLE TO 0 FOR TEMPERATURE IN FAHRENHEIT DEGREES
 #define TEMP_CELSIUS 1
@@ -36,10 +33,21 @@ String monoxide;
 #endif
 
 // DHT sensor setup (if needed, not used in this example)
-#define DHTPIN 4           // Cambiá esto al pin que uses
+#define DHTPIN 22           // Cambiá esto al pin que uses
 #define DHTTYPE DHT22
+
 // Initialize DHT sensor
 DHT dht(DHTPIN, DHTTYPE);
+
+// Touchscreen pins
+#define XPT2046_IRQ 27   // T_IRQ
+#define XPT2046_MOSI 13  // T_DIN
+#define XPT2046_MISO 12  // T_OUT
+#define XPT2046_CLK 14   // T_CLK
+#define XPT2046_CS 33    // T_CS
+
+SPIClass touchscreenSPI(VSPI);
+XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 
 // Screen dimensions
 #define SCREEN_WIDTH 320
@@ -57,6 +65,7 @@ void lv_create_main_gui(void);
 String get_formatted_datetime();
 static void alert_blink_cb(lv_timer_t * timer);
 void touchscreen_event_cb(lv_event_t * e);
+void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data);
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
@@ -73,8 +82,9 @@ void setup() {
   Serial.println(LVGL_Arduino);
 
   // Initialize Buzzer
-  pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
+  //pinMode(BUZZER_PIN, OUTPUT);
+  //digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
+
   // Initialize DHT sensor
   dht.begin();
 
@@ -90,17 +100,28 @@ void setup() {
 
   configTzTime("GMT+3", "pool.ntp.org", "time.nist.gov");
 
-  
   // Start LVGL
   lv_init();
   // Register print function for debugging
   lv_log_register_print_cb(log_print);
+
+  // Start the SPI for the touchscreen and init the touchscreen
+  touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, TOUCH_CS);
+  touchscreen.begin(touchscreenSPI);
+  // Set the Touchscreen rotation in landscape mode
+  touchscreen.setRotation(0);
 
   // Create a display object
   lv_display_t * disp;
   // Initialize the TFT display using the TFT_eSPI library
   disp = lv_tft_espi_create(SCREEN_WIDTH, SCREEN_HEIGHT, draw_buf, sizeof(draw_buf));
   lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
+
+  // Initialize an LVGL input device object (Touchscreen)
+  lv_indev_t * indev = lv_indev_create();
+  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+  // Set the callback function to read Touchscreen input
+  lv_indev_set_read_cb(indev, touchscreen_read);
   
   // Function to draw the GUI
   lv_create_main_gui();
@@ -251,7 +272,9 @@ String get_formatted_datetime() {
 static void alert_blink_cb(lv_timer_t * timer) {
   LV_UNUSED(timer);
   if (!alert_active) {
-    digitalWrite(BUZZER_PIN, LOW);  // asegurar apagado
+    //alert_active = true;
+    //lv_image_set_src(image_status_icon, &image_alert);
+    //digitalWrite(BUZZER_PIN, LOW);  // asegurar apagado
     return;
   }
 
@@ -262,7 +285,26 @@ static void alert_blink_cb(lv_timer_t * timer) {
   lv_obj_set_style_shadow_color(screen_bg, color, 0);
 
   // Activar o desactivar el buzzer
-  digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+  //digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+}
+
+// Get the Touchscreen data
+void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
+  if(touchscreen.touched()) {
+    TS_Point p = touchscreen.getPoint();
+    int x = map(p.x, 200, 3800, 1, SCREEN_WIDTH);
+    int y = map(p.y, 240, 3800, 1, SCREEN_HEIGHT);
+
+    // Touchscreen coordinates in Serial Monitor
+    Serial.print("X = ");
+    Serial.print(x);
+    Serial.print(" | Y = ");
+    Serial.print(y);
+    Serial.println();
+  }
+  else {
+    data->state = LV_INDEV_STATE_RELEASED;
+  }
 }
 
 
