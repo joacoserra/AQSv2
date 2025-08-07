@@ -46,7 +46,7 @@ DHT dht(DHTPIN, DHTTYPE);
 #define XPT2046_CLK 14   // T_CLK
 #define XPT2046_CS 33    // T_CS
 
-SPIClass touchscreenSPI(VSPI);
+SPIClass touchscreenSPI(HSPI);
 XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 
 // Screen dimensions
@@ -66,13 +66,16 @@ String get_formatted_datetime();
 static void alert_blink_cb(lv_timer_t * timer);
 void touchscreen_event_cb(lv_event_t * e);
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data);
+void lv_create_splash_screen();
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
 static lv_obj_t * text_label_time_location;
-static lv_obj_t * text_label_ppm; // Label for monoxide value
+static lv_obj_t * text_label_ppm;
 static lv_obj_t * screen_bg;
 static lv_obj_t * image_status_icon;  // Ícono dinámico: cleanair o alert
+static lv_obj_t * splash_screen;  // pantalla temporal
+static lv_timer_t * splash_timer;
 static bool alert_blink_state = false;
 static bool alert_active = false;
 
@@ -108,7 +111,6 @@ void setup() {
   // Start the SPI for the touchscreen and init the touchscreen
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   touchscreen.begin(touchscreenSPI);
-  // Set the Touchscreen rotation in landscape mode
   touchscreen.setRotation(0);
 
   // Create a display object
@@ -124,7 +126,10 @@ void setup() {
   lv_indev_set_read_cb(indev, touchscreen_read);
   
   // Function to draw the GUI
-  lv_create_main_gui();
+  //lv_create_main_gui();
+
+  // Create and show the splash screen
+  lv_create_splash_screen();
 }
 
 void loop() {
@@ -307,4 +312,26 @@ void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
   }
 }
 
+void lv_create_splash_screen() {
+  LV_IMAGE_DECLARE(image_init);
 
+  splash_screen = lv_screen_active();
+
+  // Imagen centrada
+  lv_obj_t * img = lv_image_create(splash_screen);
+  lv_image_set_src(img, &image_init);
+  lv_obj_align(img, LV_ALIGN_CENTER, 0, -30);
+
+  // Texto debajo
+  lv_obj_t * label = lv_label_create(splash_screen);
+  lv_label_set_text(label, "Air Quality System");
+  lv_obj_align(label, LV_ALIGN_CENTER, 0, 60);
+  lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+
+  // ⏲ Timer para cambiar a GUI principal después de 3000 ms
+  splash_timer = lv_timer_create([](lv_timer_t * timer) {
+    lv_obj_clean(lv_screen_active());  // limpia pantalla
+    lv_create_main_gui();              // muestra GUI principal
+    lv_timer_del(timer);               // borra el timer
+  }, 3000, NULL);
+}
