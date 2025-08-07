@@ -19,7 +19,7 @@ String humidity;
 String monoxide;
 
 // Define the pin for the buzzer
-//#define BUZZER_PIN 23
+#define BUZZER_PIN 15
 
 // SET VARIABLE TO 0 FOR TEMPERATURE IN FAHRENHEIT DEGREES
 #define TEMP_CELSIUS 1
@@ -82,8 +82,8 @@ void setup() {
   Serial.println(LVGL_Arduino);
 
   // Initialize Buzzer
-  //pinMode(BUZZER_PIN, OUTPUT);
-  //digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
 
   // Initialize DHT sensor
   dht.begin();
@@ -106,7 +106,7 @@ void setup() {
   lv_log_register_print_cb(log_print);
 
   // Start the SPI for the touchscreen and init the touchscreen
-  touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, TOUCH_CS);
+  touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   touchscreen.begin(touchscreenSPI);
   // Set the Touchscreen rotation in landscape mode
   touchscreen.setRotation(0);
@@ -213,7 +213,7 @@ void lv_create_main_gui(void) {
 void get_weather_data() {
   float t = dht.readTemperature();   // Lee temperatura en °C
   float h = dht.readHumidity();      // Lee humedad en %
-  float m = 150.0; // Simulación de valor de monóxido de carbono (MQ7) en ppm
+  float m = 15.0; // Simulación de valor de monóxido de carbono (MQ7) en ppm
 
   if (isnan(t) || isnan(h)) {
     Serial.println("Error al leer del sensor DHT22");
@@ -271,10 +271,10 @@ String get_formatted_datetime() {
 
 static void alert_blink_cb(lv_timer_t * timer) {
   LV_UNUSED(timer);
+
   if (!alert_active) {
-    //alert_active = true;
-    //lv_image_set_src(image_status_icon, &image_alert);
-    //digitalWrite(BUZZER_PIN, LOW);  // asegurar apagado
+    // Si no hay alerta, apagamos el buzzer y salimos
+    digitalWrite(BUZZER_PIN, LOW);
     return;
   }
 
@@ -285,7 +285,7 @@ static void alert_blink_cb(lv_timer_t * timer) {
   lv_obj_set_style_shadow_color(screen_bg, color, 0);
 
   // Activar o desactivar el buzzer
-  //digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+  digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
 }
 
 // Get the Touchscreen data
