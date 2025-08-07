@@ -67,6 +67,7 @@ static void alert_blink_cb(lv_timer_t * timer);
 void touchscreen_event_cb(lv_event_t * e);
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data);
 void lv_create_splash_screen();
+void lv_create_config_menu();
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
@@ -75,7 +76,10 @@ static lv_obj_t * text_label_ppm;
 static lv_obj_t * screen_bg;
 static lv_obj_t * image_status_icon;  // Ícono dinámico: cleanair o alert
 static lv_obj_t * splash_screen;  // pantalla temporal
+static lv_obj_t * main_screen;
+static lv_obj_t * config_screen;
 static lv_timer_t * splash_timer;
+
 static bool alert_blink_state = false;
 static bool alert_active = false;
 
@@ -111,7 +115,7 @@ void setup() {
   // Start the SPI for the touchscreen and init the touchscreen
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   touchscreen.begin(touchscreenSPI);
-  touchscreen.setRotation(0);
+  touchscreen.setRotation(2);
 
   // Create a display object
   lv_display_t * disp;
@@ -124,12 +128,11 @@ void setup() {
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   // Set the callback function to read Touchscreen input
   lv_indev_set_read_cb(indev, touchscreen_read);
-  
-  // Function to draw the GUI
-  //lv_create_main_gui();
 
   // Create and show the splash screen
   lv_create_splash_screen();
+
+  main_screen = lv_screen_active();
 }
 
 void loop() {
@@ -144,10 +147,9 @@ void lv_create_main_gui(void) {
   LV_IMAGE_DECLARE(image_weather_humidity);
   LV_IMAGE_DECLARE(image_monoxide);
   LV_IMAGE_DECLARE(image_cleanair);
-  LV_IMAGE_DECLARE(image_warning);
   LV_IMAGE_DECLARE(image_alert);
+  LV_IMAGE_DECLARE(image_settings);
 
-  // Get weather data from DHT sensor
   get_weather_data();
 
   // ---------- FONDO CON BORDE Y SOMBRA VERDE ----------
@@ -158,9 +160,9 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_bg_opa(screen_bg, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(screen_bg, 4, 0);
   lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
-  lv_obj_set_style_shadow_width(screen_bg, 15, 0);
-  lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
-  lv_obj_set_style_shadow_spread(screen_bg, 0, 0);
+  //lv_obj_set_style_shadow_width(screen_bg, 15, 0);
+  //lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
+  //lv_obj_set_style_shadow_spread(screen_bg, 0, 0);
 
   // ---------- ÍCONO DE ESTADO ----------
   image_status_icon = lv_image_create(lv_screen_active());
@@ -196,6 +198,15 @@ void lv_create_main_gui(void) {
   lv_label_set_text(text_label_ppm, String("   " + monoxide + " ppm").c_str());  // valor fijo por ahora
   lv_obj_align(text_label_ppm, LV_ALIGN_CENTER, 120, 80);
   lv_obj_set_style_text_font((lv_obj_t*) text_label_ppm, &lv_font_montserrat_22, 0);
+
+  // ---------- BOTÓN DE CONFIGURACIÓN ----------
+  lv_obj_t * btn_settings = lv_image_create(lv_screen_active());
+  lv_image_set_src(btn_settings, &image_settings);
+  lv_obj_align(btn_settings, LV_ALIGN_BOTTOM_LEFT, 10, -10);  // esquina inferior izquierda
+  lv_obj_add_flag(btn_settings, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(btn_settings, [](lv_event_t * e) {
+    lv_create_config_menu();
+  }, LV_EVENT_CLICKED, NULL);
 
   // Create a text label for the time and timezone aligned center in the bottom of the screen
   text_label_time_location = lv_label_create(lv_screen_active());
@@ -295,19 +306,23 @@ static void alert_blink_cb(lv_timer_t * timer) {
 
 // Get the Touchscreen data
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
-  if(touchscreen.touched()) {
+  if (touchscreen.touched()) {
     TS_Point p = touchscreen.getPoint();
-    int x = map(p.x, 200, 3800, 1, SCREEN_WIDTH);
-    int y = map(p.y, 240, 3800, 1, SCREEN_HEIGHT);
 
-    // Touchscreen coordinates in Serial Monitor
+    // Modo horizontal con rotación 270°
+    // Intercambiamos ejes y los invertimos para que coincidan
+    int x = map(p.y, 3902, 316, 0, SCREEN_WIDTH);   // p.y → X pantalla (derecha a izquierda)
+    int y = map(p.x, 3742, 315, 0, SCREEN_HEIGHT);  // p.x → Y pantalla (abajo a arriba)
+
+    data->point.x = x;
+    data->point.y = y;
+    data->state = LV_INDEV_STATE_PRESSED;
+
     Serial.print("X = ");
     Serial.print(x);
     Serial.print(" | Y = ");
-    Serial.print(y);
-    Serial.println();
-  }
-  else {
+    Serial.println(y);
+  } else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
 }
@@ -316,22 +331,39 @@ void lv_create_splash_screen() {
   LV_IMAGE_DECLARE(image_init);
 
   splash_screen = lv_screen_active();
-
-  // Imagen centrada
   lv_obj_t * img = lv_image_create(splash_screen);
   lv_image_set_src(img, &image_init);
   lv_obj_align(img, LV_ALIGN_CENTER, 0, -30);
-
-  // Texto debajo
   lv_obj_t * label = lv_label_create(splash_screen);
   lv_label_set_text(label, "Air Quality System");
   lv_obj_align(label, LV_ALIGN_CENTER, 0, 60);
   lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
-
-  // ⏲ Timer para cambiar a GUI principal después de 3000 ms
   splash_timer = lv_timer_create([](lv_timer_t * timer) {
-    lv_obj_clean(lv_screen_active());  // limpia pantalla
-    lv_create_main_gui();              // muestra GUI principal
-    lv_timer_del(timer);               // borra el timer
+    lv_obj_clean(lv_screen_active());
+    lv_create_main_gui();
+    lv_timer_del(timer);
   }, 3000, NULL);
+}
+
+void lv_create_config_menu() {
+  config_screen = lv_obj_create(NULL);
+  lv_obj_set_size(config_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+  lv_obj_t * label = lv_label_create(config_screen);
+  lv_label_set_text(label, "Men\u00fa de configuraci\u00f3n");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 40);
+
+  // Botón "Volver"
+  lv_obj_t * btn_back = lv_btn_create(config_screen);
+  lv_obj_set_size(btn_back, 80, 40);  // ← Tamaño fijo necesario
+  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+
+  lv_obj_t * label_btn = lv_label_create(btn_back);
+  lv_label_set_text(label_btn, "Volver");
+
+  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
+    lv_scr_load(main_screen);
+  }, LV_EVENT_CLICKED, NULL);
+
+  lv_scr_load(config_screen);
 }
