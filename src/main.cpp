@@ -5,10 +5,13 @@
 #include <DHT.h>
 #include <time.h>
 #include <XPT2046_Touchscreen.h>
+#include <vector>
+//#include <lv_font_montserrat_22_lat.h>
 
-// Replace with your network credentials
-const char* ssid = "Fibertel WiFi867 2.4GHz";
-const char* password = "0043559168";
+// Vector to store available Wi-Fi SSIDs
+std::vector<String> availableSSIDs;
+String wifi_ssid = "";
+String wifi_password = "";
 
 // Enter your location
 String location = "Bahia Blanca";
@@ -17,6 +20,9 @@ String location = "Bahia Blanca";
 String temperature;
 String humidity;
 String monoxide;
+
+// Touchscreen coordinates: (x, y) and pressure (z)
+int x, y;
 
 // Define the pin for the buzzer
 #define BUZZER_PIN 15
@@ -33,7 +39,7 @@ String monoxide;
 #endif
 
 // DHT sensor setup (if needed, not used in this example)
-#define DHTPIN 22           // Cambiá esto al pin que uses
+#define DHTPIN 22
 #define DHTTYPE DHT22
 
 // Initialize DHT sensor
@@ -68,6 +74,9 @@ void touchscreen_event_cb(lv_event_t * e);
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data);
 void lv_create_splash_screen();
 void lv_create_config_menu();
+void scan_and_show_wifi_list(lv_obj_t * parent);
+void show_wifi_keyboard(const char * ssid);
+void connect_to_wifi(String ssid, String password);
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
@@ -79,6 +88,9 @@ static lv_obj_t * splash_screen;  // pantalla temporal
 static lv_obj_t * main_screen;
 static lv_obj_t * config_screen;
 static lv_timer_t * splash_timer;
+static lv_obj_t * kb;
+static lv_obj_t * ta;  // Text area para contraseña
+static String selected_ssid = "";
 
 static bool alert_blink_state = false;
 static bool alert_active = false;
@@ -96,14 +108,7 @@ void setup() {
   dht.begin();
 
   // Connect to Wi-Fi
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.print("\nConnected to Wi-Fi network with IP Address: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("Esperando conexión WiFi desde menú.");
 
   configTzTime("GMT+3", "pool.ntp.org", "time.nist.gov");
 
@@ -159,7 +164,7 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_radius(screen_bg, 0, 0);
   lv_obj_set_style_bg_opa(screen_bg, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(screen_bg, 4, 0);
-  lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
+  //lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
   //lv_obj_set_style_shadow_width(screen_bg, 15, 0);
   //lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
   //lv_obj_set_style_shadow_spread(screen_bg, 0, 0);
@@ -306,23 +311,47 @@ static void alert_blink_cb(lv_timer_t * timer) {
 
 // Get the Touchscreen data
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
-  if (touchscreen.touched()) {
+  if(touchscreen.tirqTouched() && touchscreen.touched()) {
+    // Get Touchscreen points
     TS_Point p = touchscreen.getPoint();
 
-    // Modo horizontal con rotación 270°
-    // Intercambiamos ejes y los invertimos para que coincidan
-    int x = map(p.y, 3902, 316, 0, SCREEN_WIDTH);   // p.y → X pantalla (derecha a izquierda)
-    int y = map(p.x, 3742, 315, 0, SCREEN_HEIGHT);  // p.x → Y pantalla (abajo a arriba)
+    // Advanced Touchscreen calibration, LEARN MORE » https://RandomNerdTutorials.com/touchscreen-calibration/
+    float alpha_x, beta_x, alpha_y, beta_y, delta_x, delta_y;
 
-    data->point.x = x;
-    data->point.y = y;
+    // REPLACE WITH YOUR OWN CALIBRATION VALUES » https://RandomNerdTutorials.com/touchscreen-calibration/
+    alpha_x = 0.001;
+    beta_x = -0.130;
+    delta_x = 498.426;
+    alpha_y = -0.087;
+    beta_y = 0.001;
+    delta_y = 339.434;
+
+    x = alpha_y * p.x + beta_y * p.y + delta_y;
+    // clamp x between 0 and SCREEN_WIDTH - 1
+    x = max(0, x);
+    x = min(SCREEN_WIDTH - 1, x);
+
+    y = alpha_x * p.x + beta_x * p.y + delta_x;
+    // clamp y between 0 and SCREEN_HEIGHT - 1
+    y = max(0, y);
+    y = min(SCREEN_HEIGHT - 1, y);
+
+    //z = p.z;
+
     data->state = LV_INDEV_STATE_PRESSED;
 
+    // Set the coordinates
+    data->point.x = x;
+    data->point.y = y;
+
+    // Print Touchscreen info about X, Y and Pressure (Z) on the Serial Monitor
     Serial.print("X = ");
     Serial.print(x);
     Serial.print(" | Y = ");
-    Serial.println(y);
-  } else {
+    Serial.print(y);
+    Serial.println();
+  }
+  else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
 }
@@ -342,28 +371,126 @@ void lv_create_splash_screen() {
     lv_obj_clean(lv_screen_active());
     lv_create_main_gui();
     lv_timer_del(timer);
-  }, 3000, NULL);
+  }, 2000, NULL);
 }
 
 void lv_create_config_menu() {
+  LV_IMAGE_DECLARE(image_back);
   config_screen = lv_obj_create(NULL);
   lv_obj_set_size(config_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
 
+  // Título
   lv_obj_t * label = lv_label_create(config_screen);
-  lv_label_set_text(label, "Men\u00fa de configuraci\u00f3n");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 40);
+  lv_label_set_text(label, u8"Menú de configuración");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
 
-  // Botón "Volver"
-  lv_obj_t * btn_back = lv_btn_create(config_screen);
-  lv_obj_set_size(btn_back, 80, 40);  // ← Tamaño fijo necesario
+  // Botón volver
+  lv_obj_t * btn_back = lv_image_create(config_screen);
+  lv_image_set_src(btn_back, &image_back);
   lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
-
-  lv_obj_t * label_btn = lv_label_create(btn_back);
-  lv_label_set_text(label_btn, "Volver");
-
+  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
     lv_scr_load(main_screen);
   }, LV_EVENT_CLICKED, NULL);
 
+  scan_and_show_wifi_list(config_screen);
+
   lv_scr_load(config_screen);
+}
+
+void scan_and_show_wifi_list(lv_obj_t * parent) {
+  availableSSIDs.clear();
+
+  int n = WiFi.scanNetworks();
+  if (n == 0) {
+    lv_obj_t * label = lv_label_create(parent);
+    lv_label_set_text(label, "No se encontraron redes WiFi.");
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 80);
+    return;
+  }
+
+  for (int i = 0; i < n; ++i) {
+    String ssid = WiFi.SSID(i);
+    availableSSIDs.push_back(ssid);
+
+    // Crear botón para cada red
+    lv_obj_t * btn = lv_btn_create(parent);
+    lv_obj_set_width(btn, 260);
+    lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 80 + i * 50);
+
+    // Label con el nombre de la red
+    lv_obj_t * label = lv_label_create(btn);
+    lv_label_set_text(label, ssid.c_str());
+
+    // Evento: al hacer click, guardar SSID y mostrar teclado
+    lv_obj_add_event_cb(btn, [](lv_event_t * e) {
+      lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
+      lv_obj_t * label = lv_obj_get_child(btn, 0);
+      const char * ssid_selected = lv_label_get_text(label);
+      show_wifi_keyboard(ssid_selected);  // Lo implementamos en el siguiente paso
+    }, LV_EVENT_CLICKED, NULL);
+  }
+}
+
+void show_wifi_keyboard(const char * ssid) {
+  selected_ssid = String(ssid);
+
+  lv_obj_clean(lv_screen_active());
+
+  // Título
+  lv_obj_t * label = lv_label_create(lv_screen_active());
+  lv_label_set_text_fmt(label, "Contraseña para: %s", ssid);
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
+
+  // Text area
+  ta = lv_textarea_create(lv_screen_active());
+  lv_obj_set_width(ta, 250);
+  lv_textarea_set_password_mode(ta, true);
+  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 50);
+
+  // Teclado
+  kb = lv_keyboard_create(lv_screen_active());
+  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH / 2);
+  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_keyboard_set_textarea(kb, ta);
+
+  // Agregar botón "Conectar"
+  lv_obj_t * btn_connect = lv_btn_create(lv_screen_active());
+  lv_obj_align(btn_connect, LV_ALIGN_TOP_MID, 0, 100);
+  lv_obj_t * label_btn = lv_label_create(btn_connect);
+  lv_label_set_text(label_btn, "Conectar");
+
+  lv_obj_add_event_cb(btn_connect, [](lv_event_t * e) {
+    String password = lv_textarea_get_text(ta);
+    connect_to_wifi(selected_ssid, password);
+  }, LV_EVENT_CLICKED, NULL);
+}
+
+void connect_to_wifi(String ssid, String password) {
+  WiFi.disconnect();
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  lv_obj_clean(lv_screen_active());
+
+  lv_obj_t * label = lv_label_create(lv_screen_active());
+  lv_label_set_text(label, "Conectando...");
+  lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    delay(500);
+    retries++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Conectado a WiFi");
+    lv_label_set_text(label, "¡Conectado!");
+    delay(2000);
+    lv_scr_load(main_screen);  // Volver a la pantalla principal
+  } else {
+    lv_label_set_text(label, "Error al conectar");
+    delay(2000);
+    lv_obj_clean(lv_screen_active());
+    lv_create_config_menu();  // Volver al menú de configuración
+  }
 }
