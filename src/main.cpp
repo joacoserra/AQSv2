@@ -445,8 +445,9 @@ void show_wifi_keyboard(const char * ssid) {
   // Text area
   ta = lv_textarea_create(lv_screen_active());
   lv_obj_set_width(ta, 250);
+  lv_obj_set_height(ta, 50);
   lv_textarea_set_password_mode(ta, true);
-  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 50);
+  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 30);
 
   // Teclado
   kb = lv_keyboard_create(lv_screen_active());
@@ -454,16 +455,17 @@ void show_wifi_keyboard(const char * ssid) {
   lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
   lv_keyboard_set_textarea(kb, ta);
 
-  // Agregar botón "Conectar"
-  lv_obj_t * btn_connect = lv_btn_create(lv_screen_active());
-  lv_obj_align(btn_connect, LV_ALIGN_TOP_MID, 0, 100);
-  lv_obj_t * label_btn = lv_label_create(btn_connect);
-  lv_label_set_text(label_btn, "Conectar");
+  lv_obj_add_event_cb(kb, [](lv_event_t * e) {
+  lv_event_code_t code = lv_event_get_code(e);
+  lv_obj_t * keyboard = (lv_obj_t *) lv_event_get_target(e);
 
-  lv_obj_add_event_cb(btn_connect, [](lv_event_t * e) {
+  if (code == LV_EVENT_READY) {
+    // Se presionó el botón "OK" del teclado
     String password = lv_textarea_get_text(ta);
     connect_to_wifi(selected_ssid, password);
-  }, LV_EVENT_CLICKED, NULL);
+    }
+  }, LV_EVENT_ALL, NULL);
+
 }
 
 void connect_to_wifi(String ssid, String password) {
