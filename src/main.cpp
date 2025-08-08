@@ -91,6 +91,8 @@ static lv_timer_t * splash_timer;
 static lv_obj_t * kb;
 static lv_obj_t * ta;  // Text area para contraseña
 static String selected_ssid = "";
+static lv_style_t style_btn_close;
+static lv_style_t style_btn_ok;
 
 static bool alert_blink_state = false;
 static bool alert_active = false;
@@ -371,7 +373,7 @@ void lv_create_splash_screen() {
     lv_obj_clean(lv_screen_active());
     lv_create_main_gui();
     lv_timer_del(timer);
-  }, 2000, NULL);
+  }, 1000, NULL);
 }
 
 void lv_create_config_menu() {
@@ -381,7 +383,7 @@ void lv_create_config_menu() {
 
   // Título
   lv_obj_t * label = lv_label_create(config_screen);
-  lv_label_set_text(label, u8"Menú de configuración");
+  lv_label_set_text(label, "Menu de configuracion");
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
 
   // Botón volver
@@ -393,9 +395,10 @@ void lv_create_config_menu() {
     lv_scr_load(main_screen);
   }, LV_EVENT_CLICKED, NULL);
 
+  lv_scr_load(config_screen);
   scan_and_show_wifi_list(config_screen);
 
-  lv_scr_load(config_screen);
+  //lv_scr_load(config_screen);
 }
 
 void scan_and_show_wifi_list(lv_obj_t * parent) {
@@ -434,38 +437,82 @@ void scan_and_show_wifi_list(lv_obj_t * parent) {
 
 void show_wifi_keyboard(const char * ssid) {
   selected_ssid = String(ssid);
-
   lv_obj_clean(lv_screen_active());
 
-  // Título
+  // -------- TÍTULO --------
   lv_obj_t * label = lv_label_create(lv_screen_active());
-  lv_label_set_text_fmt(label, "Contraseña para: %s", ssid);
+  lv_label_set_text_fmt(label, "%s", ssid);
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
 
-  // Text area
+  // -------- TEXT AREA --------
   ta = lv_textarea_create(lv_screen_active());
-  lv_obj_set_width(ta, 250);
+  lv_obj_set_width(ta, lv_pct(90));
   lv_obj_set_height(ta, 50);
   lv_textarea_set_password_mode(ta, true);
-  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 30);
+  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 40);
+  lv_obj_add_state(ta, LV_STATE_FOCUSED);
 
-  // Teclado
+  // -------- MAPA Y CONTROL DEL TECLADO --------
+  static const char * kb_map[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "\n",
+    "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", LV_SYMBOL_BACKSPACE, "\n",
+    "A", "S", "D", "F", "G", "H", "J", "K", "L", LV_SYMBOL_NEW_LINE, "\n",
+    "Z", "X", "C", "V", "B", "N", "M", ",", ".", "!", "?", "\n",
+    LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
+  };
+
+  static const lv_buttonmatrix_ctrl_t kb_ctrl_map[] = {
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_2,
+
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_2,
+
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+    LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_4, LV_BUTTONMATRIX_CTRL_WIDTH_2,
+  };
+
+  // -------- TECLADO --------
   kb = lv_keyboard_create(lv_screen_active());
   lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH / 2);
   lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_USER_1, kb_map, kb_ctrl_map);
+  lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
   lv_keyboard_set_textarea(kb, ta);
 
-  lv_obj_add_event_cb(kb, [](lv_event_t * e) {
-  lv_event_code_t code = lv_event_get_code(e);
-  lv_obj_t * keyboard = (lv_obj_t *) lv_event_get_target(e);
+  // Estilo para las teclas
+  static lv_style_t style_kb;
+  lv_style_init(&style_kb);
+  lv_style_set_pad_row(&style_kb, 2);
+  lv_style_set_pad_column(&style_kb, 2);
+  lv_style_set_height(&style_kb, 35);
+  lv_obj_add_style(kb, &style_kb, 0);
 
-  if (code == LV_EVENT_READY) {
-    // Se presionó el botón "OK" del teclado
+  // -------- EVENTOS --------
+
+  // Botón OK
+  lv_obj_add_event_cb(kb, [](lv_event_t * e) {
     String password = lv_textarea_get_text(ta);
     connect_to_wifi(selected_ssid, password);
-    }
-  }, LV_EVENT_ALL, NULL);
+  }, LV_EVENT_READY, NULL);
 
+  // Botón CLOSE
+  lv_obj_add_event_cb(kb, [](lv_event_t * e) {
+    lv_obj_clean(lv_screen_active());
+    lv_create_config_menu();
+  }, LV_EVENT_CANCEL, NULL);
 }
 
 void connect_to_wifi(String ssid, String password) {

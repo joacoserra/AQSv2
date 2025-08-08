@@ -12,7 +12,7 @@
     #include "lvgl/lvgl.h"
 #endif
 
-#define LV_BIG_ENDIAN_SYSTEM
+//#define LV_BIG_ENDIAN_SYSTEM
 
 #ifndef LV_ATTRIBUTE_MEM_ALIGN
 #define LV_ATTRIBUTE_MEM_ALIGN
