@@ -288,8 +288,8 @@ static void timer_cb(lv_timer_t * timer){
     }
     alert_active = false;
     alert_blink_state = false;
-    buzzer_muted = false;           // listo para una próxima alerta
-    digitalWrite(BUZZER_PIN, LOW);  // por las dudas
+    buzzer_muted = false;
+    digitalWrite(BUZZER_PIN, LOW);
   }
 }
 
