@@ -77,6 +77,9 @@ void lv_create_config_menu();
 void scan_and_show_wifi_list(lv_obj_t * parent);
 void show_wifi_keyboard(const char * ssid);
 void connect_to_wifi(String ssid, String password);
+void lv_create_config_menu();
+void lv_create_wifi_menu();
+void scan_and_show_wifi_list(lv_obj_t * parent, int max_items);
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
@@ -165,7 +168,7 @@ void lv_create_main_gui(void) {
   lv_obj_center(screen_bg);
   lv_obj_set_style_radius(screen_bg, 0, 0);
   lv_obj_set_style_bg_opa(screen_bg, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(screen_bg, 4, 0);
+  //lv_obj_set_style_border_width(screen_bg, 4, 0);
   //lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
   //lv_obj_set_style_shadow_width(screen_bg, 15, 0);
   //lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
@@ -376,61 +379,36 @@ void lv_create_splash_screen() {
   }, 1000, NULL);
 }
 
-void lv_create_config_menu() {
-  LV_IMAGE_DECLARE(image_back);
-  config_screen = lv_obj_create(NULL);
-  lv_obj_set_size(config_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-  // Título
-  lv_obj_t * label = lv_label_create(config_screen);
-  lv_label_set_text(label, "Menu de configuracion");
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
-
-  // Botón volver
-  lv_obj_t * btn_back = lv_image_create(config_screen);
-  lv_image_set_src(btn_back, &image_back);
-  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
-  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
-    lv_scr_load(main_screen);
-  }, LV_EVENT_CLICKED, NULL);
-
-  lv_scr_load(config_screen);
-  scan_and_show_wifi_list(config_screen);
-
-  //lv_scr_load(config_screen);
-}
-
-void scan_and_show_wifi_list(lv_obj_t * parent) {
+void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
   availableSSIDs.clear();
 
-  int n = WiFi.scanNetworks();
-  if (n == 0) {
+  int n = WiFi.scanNetworks();  // sincrónico
+  if (n <= 0) {
     lv_obj_t * label = lv_label_create(parent);
     lv_label_set_text(label, "No se encontraron redes WiFi.");
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 80);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 0);
     return;
   }
 
-  for (int i = 0; i < n; ++i) {
+  int count = min(n, max_items);
+  for (int i = 0; i < count; ++i) {
     String ssid = WiFi.SSID(i);
     availableSSIDs.push_back(ssid);
 
-    // Crear botón para cada red
+    // Botón por red
     lv_obj_t * btn = lv_btn_create(parent);
-    lv_obj_set_width(btn, 260);
-    lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 80 + i * 50);
+    lv_obj_set_width(btn, lv_pct(100));
 
-    // Label con el nombre de la red
     lv_obj_t * label = lv_label_create(btn);
     lv_label_set_text(label, ssid.c_str());
+    lv_obj_center(label);
 
-    // Evento: al hacer click, guardar SSID y mostrar teclado
+    // Evento: al tocar, abrir teclado de contraseña
     lv_obj_add_event_cb(btn, [](lv_event_t * e) {
       lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
       lv_obj_t * label = lv_obj_get_child(btn, 0);
       const char * ssid_selected = lv_label_get_text(label);
-      show_wifi_keyboard(ssid_selected);  // Lo implementamos en el siguiente paso
+      show_wifi_keyboard(ssid_selected);
     }, LV_EVENT_CLICKED, NULL);
   }
 }
@@ -548,4 +526,113 @@ void connect_to_wifi(String ssid, String password) {
     lv_obj_clean(lv_screen_active());
     lv_create_config_menu();  // Volver al menú de configuración
   }
+}
+
+void lv_create_config_menu() {
+  LV_IMAGE_DECLARE(image_back);
+
+  // Crear pantalla de configuración
+  config_screen = lv_obj_create(NULL);
+  lv_obj_set_size(config_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_scr_load(config_screen);
+
+  // Título
+  lv_obj_t * title = lv_label_create(config_screen);
+  lv_label_set_text(title, "Menu de configuracion");
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+  // Botón Volver
+  lv_obj_t * btn_back = lv_image_create(config_screen);
+  lv_image_set_src(btn_back, &image_back);
+  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
+    lv_scr_load(main_screen);
+  }, LV_EVENT_CLICKED, NULL);
+
+  // Contenedor para opciones (columna)
+  lv_obj_t * list = lv_obj_create(config_screen);
+  lv_obj_set_size(list, lv_pct(90), lv_pct(65));
+  lv_obj_align(list, LV_ALIGN_CENTER, 0, 10);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(list, 12, 0);
+  lv_obj_set_style_pad_all(list, 10, 0);
+  lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+  // Quitar borde, sombra y contorno
+  lv_obj_set_style_border_width(list, 0, 0);
+  lv_obj_set_style_shadow_width(list, 0, 0);
+  lv_obj_set_style_outline_width(list, 0, 0);
+
+  // Botón Wi‑Fi
+  lv_obj_t * btn_wifi = lv_btn_create(list);
+  lv_obj_set_width(btn_wifi, lv_pct(100));
+  lv_obj_t * lbl_wifi = lv_label_create(btn_wifi);
+  lv_label_set_text(lbl_wifi, "WiFi");
+  lv_obj_center(lbl_wifi);
+  lv_obj_add_event_cb(btn_wifi, [](lv_event_t * e) {
+    lv_create_wifi_menu();
+  }, LV_EVENT_CLICKED, NULL);
+
+  // Botón Agregar Sensor (placeholder)
+  lv_obj_t * btn_sensor = lv_btn_create(list);
+  lv_obj_set_width(btn_sensor, lv_pct(100));
+  lv_obj_t * lbl_sensor = lv_label_create(btn_sensor);
+  lv_label_set_text(lbl_sensor, "Agregar sensor");
+  lv_obj_center(lbl_sensor);
+  // (por ahora sin handler)
+}
+
+void lv_create_wifi_menu() {
+  LV_IMAGE_DECLARE(image_back);
+
+  lv_obj_t * wifi_screen = lv_obj_create(NULL);
+  lv_obj_set_size(wifi_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_scr_load(wifi_screen);
+
+  // Título
+  lv_obj_t * title = lv_label_create(wifi_screen);
+  lv_label_set_text(title, "Redes WiFi");
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+  // Botón Volver
+  lv_obj_t * btn_back = lv_image_create(wifi_screen);
+  lv_image_set_src(btn_back, &image_back);
+  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
+    lv_create_config_menu();
+  }, LV_EVENT_CLICKED, NULL);
+
+  // Contenedor scrollable para la lista
+  lv_obj_t * list = lv_obj_create(wifi_screen);
+  lv_obj_set_size(list, lv_pct(90), lv_pct(70));
+  lv_obj_align(list, LV_ALIGN_CENTER, 0, 10);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(list, 8, 0);
+  lv_obj_set_style_pad_all(list, 8, 0);
+  lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  // Quitar borde, sombra y contorno
+  lv_obj_set_style_border_width(list, 0, 0);
+  lv_obj_set_style_shadow_width(list, 0, 0);
+  lv_obj_set_style_outline_width(list, 0, 0);
+
+  lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+
+  // Etiqueta "Escaneando..."
+  lv_obj_t * scanning = lv_label_create(list);
+  lv_label_set_text(scanning, "Escaneando...");
+  lv_obj_center(scanning);
+
+  // Hacemos el escaneo (sincrónico) y mostramos máx. 10
+  // (si querés, podés cambiar a WiFi.scanNetworks(true) y esperar, pero así es simple)
+  lv_timer_t * t = lv_timer_create_basic();
+  lv_timer_set_period(t, 10);
+  lv_timer_set_repeat_count(t, 1);
+  lv_timer_set_user_data(t, list);
+  lv_timer_set_cb(t, [](lv_timer_t * t) {
+    lv_obj_t * parent_list = (lv_obj_t *)lv_timer_get_user_data(t);
+    lv_obj_clean(parent_list); // limpiar "Escaneando..."
+    scan_and_show_wifi_list(parent_list, 10); // <= sólo 10 redes
+  });
 }
