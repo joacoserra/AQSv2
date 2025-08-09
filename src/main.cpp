@@ -27,6 +27,8 @@ int x, y;
 
 // Define the pin for the buzzer
 #define BUZZER_PIN 15
+static bool buzzer_muted = false;
+
 
 // SET VARIABLE TO 0 FOR TEMPERATURE IN FAHRENHEIT DEGREES
 #define TEMP_CELSIUS 1
@@ -240,7 +242,7 @@ void lv_create_main_gui(void) {
 void get_weather_data() {
   float t = dht.readTemperature();   // Lee temperatura en °C
   float h = dht.readHumidity();      // Lee humedad en %
-  float m = 15.0; // Simulación de valor de monóxido de carbono (MQ7) en ppm
+  float m = 150.0; // Simulación de valor de monóxido de carbono (MQ7) en ppm
 
   if (isnan(t) || isnan(h)) {
     Serial.println("Error al leer del sensor DHT22");
@@ -269,19 +271,25 @@ static void timer_cb(lv_timer_t * timer){
 
     // Verificar nivel de CO
   float ppm = monoxide.toFloat();
+  
   if (ppm > 100.0) {
+    // si se acaba de entrar en alerta, reactivamos el buzzer (quitamos mute)
+    if (!alert_active) {
+      buzzer_muted = false;
+    }
     alert_active = true;
-    lv_image_set_src(image_status_icon, &image_alert);  // cambiar icono
-
+    lv_image_set_src(image_status_icon, &image_alert);
   } else {
     if (alert_active) {
-      // solo si veníamos de alerta, restauramos
+      // veníamos de alerta y se normalizó
       lv_image_set_src(image_status_icon, &image_cleanair);
       lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
       lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
     }
-      alert_active = false;
-      alert_blink_state = false;
+    alert_active = false;
+    alert_blink_state = false;
+    buzzer_muted = false;           // listo para una próxima alerta
+    digitalWrite(BUZZER_PIN, LOW);  // por las dudas
   }
 }
 
@@ -312,7 +320,13 @@ static void alert_blink_cb(lv_timer_t * timer) {
   lv_obj_set_style_shadow_color(screen_bg, color, 0);
 
   // Activar o desactivar el buzzer
-  digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+  //digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+
+  if (!buzzer_muted) {
+    digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+  } else {
+    digitalWrite(BUZZER_PIN, LOW);
+  }
 }
 
 // Get the Touchscreen data
@@ -342,13 +356,17 @@ void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
     y = max(0, y);
     y = min(SCREEN_HEIGHT - 1, y);
 
-    //z = p.z;
-
     data->state = LV_INDEV_STATE_PRESSED;
 
     // Set the coordinates
     data->point.x = x;
     data->point.y = y;
+
+    // Si hay alerta, cualquier toque silencia el buzzer
+    if (alert_active) {
+      buzzer_muted = true;
+      digitalWrite(BUZZER_PIN, LOW);
+    }
 
     // Print Touchscreen info about X, Y and Pressure (Z) on the Serial Monitor
     Serial.print("X = ");
