@@ -2,11 +2,56 @@
 #include <TFT_eSPI.h>
 #include "aqs_images.h"
 #include <WiFi.h>
-#include <DHT.h>
+#include <esp_wifi.h>
+//#include <DHT.h>
 #include <time.h>
 #include <XPT2046_Touchscreen.h>
 #include <vector>
-//#include <lv_font_montserrat_22_lat.h>
+#include <esp_now.h>
+
+// ====== Paquete idéntico al EMISOR ======
+typedef struct struct_message {
+    char  sensor;       // 'A' o 'B'
+    float temp;         // temperatura
+    float float_hum;    // humedad
+    float mono;         // CO ppm
+    bool  ackRequired;  // si el emisor pide ACK
+    bool  isAck;        // si este paquete es un ACK
+} struct_message;
+
+// ==== Descubrimiento de sensores ESP-NOW ====
+struct DiscoveredSensor {
+  uint8_t mac[6];
+  String  macStr;     // "AA:BB:CC:DD:EE:FF"
+  String  name;       // asignado por el usuario (p.ej. "Cocina")
+  struct_message last;
+  uint32_t lastSeen;  // millis() de último paquete
+};
+
+// ---- UI de "Sensores disponibles" ----
+static lv_obj_t * sensor_list_screen = nullptr;
+static lv_obj_t * sensor_list_container = nullptr;
+static lv_timer_t * sensor_scan_timer = nullptr;
+
+// === Contexto para nombrar sensor ===
+struct NameCtx {
+  lv_obj_t * ta;   // textarea donde se escribe el nombre
+  size_t     idx;  // índice del sensor en 'sensors'
+};
+static NameCtx g_name_ctx;
+
+static std::vector<DiscoveredSensor> sensors;
+static int selectedSensorIndex = -1;     // índice del sensor activo (en 'sensors'), -1 = ninguno
+static const uint32_t SENSOR_STALE_MS = 15000; // visible en listas si visto en últimos 15s
+
+// Label para mostrar el nombre del sensor activo
+static lv_obj_t * text_label_sensor_name = nullptr;
+
+// ====== Estado de recepción ======
+static volatile bool espnow_has_data = false;
+//static struct_message last_rx = {0};
+static uint32_t last_rx_ms = 0;
+static const uint32_t ESPNOW_TIMEOUT_MS = 15000; // 15s: si no llegan datos, usamos fallback
 
 // Vector to store available Wi-Fi SSIDs
 std::vector<String> availableSSIDs;
@@ -42,11 +87,11 @@ static bool buzzer_muted = false;
 #endif
 
 // DHT sensor setup (if needed, not used in this example)
-#define DHTPIN 22
-#define DHTTYPE DHT22
+//#define DHTPIN 22
+//#define DHTTYPE DHT22
 
 // Initialize DHT sensor
-DHT dht(DHTPIN, DHTTYPE);
+//DHT dht(DHTPIN, DHTTYPE);
 
 // Touchscreen pins
 #define XPT2046_IRQ 27   // T_IRQ
@@ -83,6 +128,19 @@ void connect_to_wifi(String ssid, String password);
 void lv_create_config_menu();
 void lv_create_wifi_menu();
 void scan_and_show_wifi_list(lv_obj_t * parent, int max_items);
+static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int len);
+static int wifi_channel();
+static String mac_to_string(const uint8_t mac[6]);
+static int find_sensor_index_by_mac(const uint8_t mac[6]);
+static int touch_or_add_sensor(const uint8_t mac[6]);
+static void open_name_screen(size_t idx);
+static void sensor_btn_clicked_cb(lv_event_t * e);
+void kb_name_ok_cb(lv_event_t * e);
+void kb_name_cancel_cb(lv_event_t * e);
+static void open_sensor_list_screen();
+static void populate_sensor_list();
+static void sensor_scan_timer_cb(lv_timer_t * t);
+static void sensor_back_btn_cb(lv_event_t * e);
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
@@ -99,7 +157,6 @@ static lv_obj_t * ta;  // Text area para contraseña
 static String selected_ssid = "";
 static lv_style_t style_btn_close;
 static lv_style_t style_btn_ok;
-
 static bool alert_blink_state = false;
 static bool alert_active = false;
 
@@ -108,12 +165,21 @@ void setup() {
   Serial.begin(115200);
   Serial.println(LVGL_Arduino);
 
+  // --- ESP-NOW ---
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error inicializando ESP-NOW");
+  } else {
+    esp_now_register_recv_cb(on_espnow_recv);
+    Serial.printf("ESP-NOW listo. Canal actual: %d\n", wifi_channel());
+  }
+
   // Initialize Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
 
   // Initialize DHT sensor
-  dht.begin();
+  //dht.begin();
 
   // Connect to Wi-Fi
   Serial.println("Esperando conexión WiFi desde menú.");
@@ -142,9 +208,8 @@ void setup() {
   // Set the callback function to read Touchscreen input
   lv_indev_set_read_cb(indev, touchscreen_read);
 
-  // Create and show the splash screen
+  // Pantalla de inicio y pantalla principal
   lv_create_splash_screen();
-
   main_screen = lv_screen_active();
 }
 
@@ -171,11 +236,12 @@ void lv_create_main_gui(void) {
   lv_obj_center(screen_bg);
   lv_obj_set_style_radius(screen_bg, 0, 0);
   lv_obj_set_style_bg_opa(screen_bg, LV_OPA_TRANSP, 0);
-  //lv_obj_set_style_border_width(screen_bg, 4, 0);
-  //lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
-  //lv_obj_set_style_shadow_width(screen_bg, 15, 0);
-  //lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
-  //lv_obj_set_style_shadow_spread(screen_bg, 0, 0);
+
+  // Nombre del sensor activo (arriba centrado)
+  text_label_sensor_name = lv_label_create(lv_screen_active());
+  lv_label_set_text(text_label_sensor_name, "Sin sensor");
+  lv_obj_align(text_label_sensor_name, LV_ALIGN_TOP_MID, 0, 8);
+  lv_obj_set_style_text_font(text_label_sensor_name, &lv_font_montserrat_22, 0);
 
   // ---------- ÍCONO DE ESTADO ----------
   image_status_icon = lv_image_create(lv_screen_active());
@@ -240,18 +306,23 @@ void lv_create_main_gui(void) {
 
 // Function to get weather data from the DHT sensor
 void get_weather_data() {
-  float t = dht.readTemperature();   // Lee temperatura en °C
-  float h = dht.readHumidity();      // Lee humedad en %
-  float m = 150.0; // Simulación de valor de monóxido de carbono (MQ7) en ppm
-
-  if (isnan(t) || isnan(h)) {
-    Serial.println("Error al leer del sensor DHT22");
-    return;
+  if (selectedSensorIndex >= 0 && selectedSensorIndex < (int)sensors.size()) {
+    const DiscoveredSensor &s = sensors[selectedSensorIndex];
+    bool fresh = (millis() - s.lastSeen) <= SENSOR_STALE_MS;
+    if (fresh && !isnan(s.last.temp) && !isnan(s.last.float_hum)) {
+      temperature = String(s.last.temp, 1);
+      humidity    = String(s.last.float_hum, 1);
+      monoxide    = (!isnan(s.last.mono) && s.last.mono >= 0) ? String(s.last.mono, 1) : "0";
+      // Actualizar nombre en pantalla
+      lv_label_set_text(text_label_sensor_name, s.name.length() ? s.name.c_str() : s.macStr.c_str());
+      return;
+    }
   }
-
-  temperature = String(t, 1);  // Un decimal
-  humidity = String(h, 1);
-  monoxide = String(m, 1); // Un decimal
+  // Sin sensor activo o datos viejos
+  temperature = "--";
+  humidity    = "--";
+  monoxide    = "0";
+  if (text_label_sensor_name) lv_label_set_text(text_label_sensor_name, "Sin sensor");
 }
 
 // If logging is enabled, it will inform the user about what is happening in the library
@@ -628,7 +699,9 @@ void lv_create_config_menu() {
   lv_label_set_text(lbl_sensor, "Agregar sensor");
   lv_obj_center(lbl_sensor);
   lv_obj_add_style(lbl_sensor, &style_btn_text, 0); // aplicar estilo de fuente
-  // (por ahora sin handler)
+  lv_obj_add_event_cb(btn_sensor, [](lv_event_t * e) {
+  open_sensor_list_screen();
+  }, LV_EVENT_CLICKED, NULL);
 }
 
 void lv_create_wifi_menu() {
@@ -693,4 +766,307 @@ void lv_create_wifi_menu() {
     lv_obj_clean(parent_list); // limpiar "Escaneando..."
     scan_and_show_wifi_list(parent_list, WIFI_LIST_LIMIT);
   });
+}
+
+static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  if (!mac || len != sizeof(struct_message)) return;
+
+  // Registrar/actualizar sensor visto
+  int idx = touch_or_add_sensor(mac);
+
+  // Guardar último paquete
+  memcpy(&sensors[idx].last, incomingData, sizeof(struct_message));
+  sensors[idx].lastSeen = millis();
+
+  // Log útil
+  const struct_message &in = sensors[idx].last;
+  Serial.printf("[ESP-NOW] RX %s | S:%c T:%.1f H:%.1f CO:%.1f (named:'%s')\n",
+                sensors[idx].macStr.c_str(), in.sensor, in.temp, in.float_hum, in.mono,
+                sensors[idx].name.c_str());
+
+  // ACK opcional si el emisor lo pide
+  if (in.ackRequired) {
+    if (!esp_now_is_peer_exist(mac)) {
+      esp_now_peer_info_t peer{};
+      memcpy(peer.peer_addr, mac, 6);
+      peer.channel = 0;
+      peer.encrypt = false;
+      esp_now_add_peer(&peer);
+    }
+    struct_message ack{};
+    ack.sensor = 'R';
+    ack.temp = in.temp;
+    ack.float_hum = in.float_hum;
+    ack.mono = in.mono;
+    ack.ackRequired = false;
+    ack.isAck = true;
+    esp_now_send(mac, (uint8_t*)&ack, sizeof(ack));
+  }
+}
+
+// (opcional) para debugging canal WiFi
+static int wifi_channel() {
+  wifi_second_chan_t sc;
+  uint8_t ch = 0;
+  esp_wifi_get_channel(&ch, &sc);
+  return (int)ch;
+}
+
+// Helpers
+static String mac_to_string(const uint8_t mac[6]) {
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
+static int find_sensor_index_by_mac(const uint8_t mac[6]) {
+  for (size_t i = 0; i < sensors.size(); ++i) {
+    if (memcmp(sensors[i].mac, mac, 6) == 0) return (int)i;
+  }
+  return -1;
+}
+
+static int touch_or_add_sensor(const uint8_t mac[6]) {
+  int idx = find_sensor_index_by_mac(mac);
+  if (idx < 0) {
+    DiscoveredSensor s{};
+    memcpy(s.mac, mac, 6);
+    s.macStr  = mac_to_string(mac);
+    s.name    = "";          // sin nombre por defecto
+    s.lastSeen = millis();
+    sensors.push_back(s);
+    return (int)sensors.size() - 1;
+  } else {
+    sensors[idx].lastSeen = millis();
+    return idx;
+  }
+}
+
+// Abre la pantalla de "nombrar" un sensor (idx ya elegido)
+static void open_name_screen(size_t idx) {
+  lv_obj_t * scr2 = lv_obj_create(NULL);
+  lv_obj_set_size(scr2, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_scr_load(scr2);
+
+  // Título
+  lv_obj_t * t2 = lv_label_create(scr2);
+  lv_label_set_text_fmt(t2, "Nombrar sensor\n%s", sensors[idx].macStr.c_str());
+  lv_obj_align(t2, LV_ALIGN_TOP_MID, 0, 6);
+
+  // TextArea
+  lv_obj_t * ta = lv_textarea_create(scr2);
+  lv_obj_set_width(ta, lv_pct(90));
+  lv_obj_set_height(ta, 50);
+  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 60);
+  lv_textarea_set_placeholder_text(ta, "Ej: Cocina");
+  if (sensors[idx].name.length()) lv_textarea_set_text(ta, sensors[idx].name.c_str());
+  lv_obj_add_state(ta, LV_STATE_FOCUSED);
+
+  // Teclado
+  lv_obj_t * kb = lv_keyboard_create(scr2);
+  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH/2);
+  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_keyboard_set_textarea(kb, ta);
+
+  // Preparar contexto a pasar por user_data
+  g_name_ctx.ta  = ta;
+  g_name_ctx.idx = idx;
+
+  // Eventos del teclado (OK y CANCEL)
+  extern void kb_name_ok_cb(lv_event_t * e);
+  extern void kb_name_cancel_cb(lv_event_t * e);
+  lv_obj_add_event_cb(kb, kb_name_ok_cb, LV_EVENT_READY,  &g_name_ctx);
+  lv_obj_add_event_cb(kb, kb_name_cancel_cb, LV_EVENT_CANCEL, &g_name_ctx);
+}
+
+// Al tocar un sensor de la lista: pantalla para nombrar y seleccionar
+static void sensor_btn_clicked_cb(lv_event_t * e) {
+  lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
+  size_t idx = (size_t)lv_obj_get_user_data(btn);
+
+  // —— pantalla de “nombrar” (igual a lo que ya tenías) ——
+  lv_obj_t * scr2 = lv_obj_create(NULL);
+  lv_obj_set_size(scr2, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_scr_load(scr2);
+
+  lv_obj_t * t2 = lv_label_create(scr2);
+  lv_label_set_text_fmt(t2, "Nombrar sensor\n%s", sensors[idx].macStr.c_str());
+  lv_obj_align(t2, LV_ALIGN_TOP_MID, 0, 6);
+
+  lv_obj_t * ta = lv_textarea_create(scr2);
+  lv_obj_set_width(ta, lv_pct(90));
+  lv_obj_set_height(ta, 50);
+  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 60);
+  lv_textarea_set_placeholder_text(ta, "Ej: Cocina");
+  if (sensors[idx].name.length()) lv_textarea_set_text(ta, sensors[idx].name.c_str());
+  lv_obj_add_state(ta, LV_STATE_FOCUSED);
+
+  lv_obj_t * kb = lv_keyboard_create(scr2);
+  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH/2);
+  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_keyboard_set_textarea(kb, ta);
+
+  // OK: guardar nombre y seleccionar sensor activo
+  lv_obj_add_event_cb(kb, [](lv_event_t * e3) {
+    // Recuperar objetos desde el árbol (simple y efectivo)
+    lv_obj_t * kb_ = (lv_obj_t *)lv_event_get_target(e3);
+    lv_obj_t * ta_ = (lv_obj_t *)lv_keyboard_get_textarea(kb_);
+    String name = String(lv_textarea_get_text(ta_));
+
+    // Pequeño truco: guardamos idx en user_data del teclado cuando lo creamos
+    size_t idx_ = (size_t)lv_obj_get_user_data(kb_);
+
+    sensors[idx_].name = name;
+    selectedSensorIndex = (int)idx_;
+
+    // Volver a principal y actualizar
+    lv_scr_load(main_screen);
+    if (text_label_sensor_name) {
+      const String &n = sensors[idx_].name;
+      lv_label_set_text(text_label_sensor_name, n.length() ? n.c_str() : sensors[idx_].macStr.c_str());
+    }
+
+    // Asegurar que el timer de escaneo se detenga si quedó
+    if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
+    if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
+    sensor_list_container = nullptr;
+
+  }, LV_EVENT_READY, NULL);
+
+  // Guardar idx en user_data del teclado para leerlo en READY
+  lv_obj_set_user_data(kb, (void*)idx);
+
+  // CANCEL: volver a la lista (y retomar el escaneo)
+  lv_obj_add_event_cb(kb, [](lv_event_t * e3) {
+    // Volvemos a la lista
+    open_sensor_list_screen();
+  }, LV_EVENT_CANCEL, NULL);
+}
+
+// Callback del botón OK del teclado de “nombrar”
+void kb_name_ok_cb(lv_event_t * e) {
+  NameCtx * ctx = (NameCtx *)lv_event_get_user_data(e);
+  if (!ctx) return;
+
+  // Guardar nombre y seleccionar sensor activo
+  sensors[ctx->idx].name = String(lv_textarea_get_text(ctx->ta));
+  selectedSensorIndex = (int)ctx->idx;
+
+  // Volver a principal y actualizar etiqueta
+  lv_scr_load(main_screen);
+  if (text_label_sensor_name) {
+    const String &n = sensors[ctx->idx].name;
+    lv_label_set_text(text_label_sensor_name, n.length() ? n.c_str() : sensors[ctx->idx].macStr.c_str());
+  }
+}
+
+// Callback del botón CANCEL del teclado
+void kb_name_cancel_cb(lv_event_t * e) {
+  // Volver al menú de configuración (simple)
+  lv_create_config_menu();
+}
+
+// Crea/abre la pantalla con la lista de sensores detectados
+static void open_sensor_list_screen() {
+  // Cerrar pantalla previa (si existía) y matar timer previo
+  if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
+  if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
+
+  sensor_list_screen = lv_obj_create(NULL);
+  lv_obj_set_size(sensor_list_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_scr_load(sensor_list_screen);
+
+  // Título
+  lv_obj_t * title = lv_label_create(sensor_list_screen);
+  lv_label_set_text(title, "Sensores disponibles");
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+  // Botón Volver (usa tu ícono 'image_back' si querés)
+  LV_IMAGE_DECLARE(image_back);
+  lv_obj_t * btn_back = lv_image_create(sensor_list_screen);
+  lv_image_set_src(btn_back, &image_back);
+  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(btn_back, sensor_back_btn_cb, LV_EVENT_CLICKED, NULL);
+
+  // Contenedor scrollable (lista)
+  sensor_list_container = lv_obj_create(sensor_list_screen);
+  lv_obj_set_size(sensor_list_container, lv_pct(90), lv_pct(70));
+  lv_obj_align(sensor_list_container, LV_ALIGN_CENTER, 0, 10);
+  lv_obj_set_flex_flow(sensor_list_container, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(sensor_list_container, LV_DIR_VER);
+  lv_obj_set_style_bg_opa(sensor_list_container, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(sensor_list_container, 0, 0);
+  lv_obj_set_style_shadow_width(sensor_list_container, 0, 0);
+  lv_obj_set_style_outline_width(sensor_list_container, 0, 0);
+  lv_obj_set_style_pad_row(sensor_list_container, 8, 0);
+  lv_obj_set_style_pad_all(sensor_list_container, 8, 0);
+
+  // Poblado inicial
+  populate_sensor_list();
+
+  // Timer de refresco: si no hay sensores (o aunque haya), seguí actualizando cada 2s
+  sensor_scan_timer = lv_timer_create(sensor_scan_timer_cb, 2000, NULL);
+}
+
+// Llena (o recarga) la lista según lo visto recientemente
+static void populate_sensor_list() {
+  if (!sensor_list_container) return;
+
+  lv_obj_clean(sensor_list_container);
+
+  int shown = 0;
+  uint32_t now = millis();
+
+  for (size_t i = 0; i < sensors.size(); ++i) {
+    if (now - sensors[i].lastSeen > SENSOR_STALE_MS) continue; // muy viejo: no mostrar
+
+    lv_obj_t * btn = lv_btn_create(sensor_list_container);
+    lv_obj_set_width(btn, lv_pct(100));
+    lv_obj_set_height(btn, 40);
+
+    String line = (sensors[i].name.length() ? sensors[i].name : sensors[i].macStr);
+    line += "   ";
+    line += String(sensors[i].last.temp,1) + "°C  ";
+    line += String(sensors[i].last.float_hum,1) + "%  ";
+    line += String(sensors[i].last.mono,0) + "ppm";
+
+    lv_obj_t * lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, line.c_str());
+    lv_obj_center(lbl);
+
+    // Guardar índice como user_data y conectar callback
+    lv_obj_set_user_data(btn, (void*)i);
+    lv_obj_add_event_cb(btn, sensor_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    shown++;
+  }
+
+  if (shown == 0) {
+    // Mensaje de búsqueda continua
+    lv_obj_t * lbl = lv_label_create(sensor_list_container);
+    lv_label_set_text(lbl, "Buscando sensores...\nAsegurate de que esten transmitiendo.");
+    lv_obj_center(lbl);
+  }
+}
+
+// Timer que repuebla la lista (para “seguir buscando”)
+static void sensor_scan_timer_cb(lv_timer_t * t) {
+  LV_UNUSED(t);
+  // Si el usuario salió de la pantalla, frenamos
+  if (!sensor_list_screen || !sensor_list_container) {
+    if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
+    return;
+  }
+  populate_sensor_list();
+}
+
+// Botón volver: regresar al menú de configuración
+static void sensor_back_btn_cb(lv_event_t * e) {
+  LV_UNUSED(e);
+  if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
+  if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
+  sensor_list_container = nullptr;
+  lv_create_config_menu();
 }
