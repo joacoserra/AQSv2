@@ -12,6 +12,7 @@
 std::vector<String> availableSSIDs;
 String wifi_ssid = "";
 String wifi_password = "";
+static const int WIFI_LIST_LIMIT = 20;
 
 // Enter your location
 String location = "Bahia Blanca";
@@ -390,6 +391,15 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
     return;
   }
 
+  // Estilo para texto más grande
+  static lv_style_t style_wifi_text;
+  static bool style_wifi_text_inited = false;
+  if(!style_wifi_text_inited) {
+      style_wifi_text_inited = true;
+      lv_style_init(&style_wifi_text);
+      lv_style_set_text_font(&style_wifi_text, &lv_font_montserrat_18); // ajusta el tamaño aquí
+  }
+
   int count = min(n, max_items);
   for (int i = 0; i < count; ++i) {
     String ssid = WiFi.SSID(i);
@@ -397,11 +407,14 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
 
     // Botón por red
     lv_obj_t * btn = lv_btn_create(parent);
-    lv_obj_set_width(btn, lv_pct(100));
+    lv_obj_set_width(btn, lv_pct(70));
+    lv_obj_set_height(btn, 30);
+    lv_obj_center(btn);
 
     lv_obj_t * label = lv_label_create(btn);
     lv_label_set_text(label, ssid.c_str());
     lv_obj_center(label);
+    lv_obj_add_style(label, &style_wifi_text, 0); // aplicar estilo de fuente
 
     // Evento: al tocar, abrir teclado de contraseña
     lv_obj_add_event_cb(btn, [](lv_event_t * e) {
@@ -411,6 +424,8 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
       show_wifi_keyboard(ssid_selected);
     }, LV_EVENT_CLICKED, NULL);
   }
+  
+  lv_obj_scroll_to_y(parent, 0, LV_ANIM_OFF);
 }
 
 void show_wifi_keyboard(const char * ssid) {
@@ -495,7 +510,7 @@ void show_wifi_keyboard(const char * ssid) {
   // Botón CLOSE
   lv_obj_add_event_cb(kb, [](lv_event_t * e) {
     lv_obj_clean(lv_screen_active());
-    lv_create_config_menu();
+    lv_create_wifi_menu();
   }, LV_EVENT_CANCEL, NULL);
 }
 
@@ -530,6 +545,14 @@ void connect_to_wifi(String ssid, String password) {
 
 void lv_create_config_menu() {
   LV_IMAGE_DECLARE(image_back);
+
+  static lv_style_t style_btn_text;
+  static bool style_btn_text_inited = false;
+  if(!style_btn_text_inited) {
+      style_btn_text_inited = true;
+      lv_style_init(&style_btn_text);
+      lv_style_set_text_font(&style_btn_text, &lv_font_montserrat_28); // fuente más grande
+  }
 
   // Crear pantalla de configuración
   config_screen = lv_obj_create(NULL);
@@ -567,9 +590,11 @@ void lv_create_config_menu() {
   // Botón Wi‑Fi
   lv_obj_t * btn_wifi = lv_btn_create(list);
   lv_obj_set_width(btn_wifi, lv_pct(100));
+  lv_obj_set_height(btn_wifi, 50);
   lv_obj_t * lbl_wifi = lv_label_create(btn_wifi);
   lv_label_set_text(lbl_wifi, "WiFi");
   lv_obj_center(lbl_wifi);
+  lv_obj_add_style(lbl_wifi, &style_btn_text, 0); // aplicar estilo de fuente
   lv_obj_add_event_cb(btn_wifi, [](lv_event_t * e) {
     lv_create_wifi_menu();
   }, LV_EVENT_CLICKED, NULL);
@@ -577,9 +602,11 @@ void lv_create_config_menu() {
   // Botón Agregar Sensor (placeholder)
   lv_obj_t * btn_sensor = lv_btn_create(list);
   lv_obj_set_width(btn_sensor, lv_pct(100));
+  lv_obj_set_height(btn_sensor, 50);
   lv_obj_t * lbl_sensor = lv_label_create(btn_sensor);
   lv_label_set_text(lbl_sensor, "Agregar sensor");
   lv_obj_center(lbl_sensor);
+  lv_obj_add_style(lbl_sensor, &style_btn_text, 0); // aplicar estilo de fuente
   // (por ahora sin handler)
 }
 
@@ -609,15 +636,25 @@ void lv_create_wifi_menu() {
   lv_obj_set_size(list, lv_pct(90), lv_pct(70));
   lv_obj_align(list, LV_ALIGN_CENTER, 0, 10);
   lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+
+
   lv_obj_set_style_pad_row(list, 8, 0);
   lv_obj_set_style_pad_all(list, 8, 0);
+  // Scroll solo vertical y sin “snap”
   lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  lv_obj_set_scroll_snap_y(list, LV_SCROLL_SNAP_NONE);
+  lv_obj_set_style_anim_time(list, 0, 0);
   // Quitar borde, sombra y contorno
   lv_obj_set_style_border_width(list, 0, 0);
   lv_obj_set_style_shadow_width(list, 0, 0);
   lv_obj_set_style_outline_width(list, 0, 0);
-
   lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+
+  lv_obj_set_flex_align(list,
+    LV_FLEX_ALIGN_CENTER,  // alineación horizontal (main axis para row, cross axis para column)
+    LV_FLEX_ALIGN_CENTER,  // alineación vertical (en tu caso no afecta mucho)
+    LV_FLEX_ALIGN_CENTER   // alineación de contenido (última línea)
+  );
 
   // Etiqueta "Escaneando..."
   lv_obj_t * scanning = lv_label_create(list);
@@ -633,6 +670,6 @@ void lv_create_wifi_menu() {
   lv_timer_set_cb(t, [](lv_timer_t * t) {
     lv_obj_t * parent_list = (lv_obj_t *)lv_timer_get_user_data(t);
     lv_obj_clean(parent_list); // limpiar "Escaneando..."
-    scan_and_show_wifi_list(parent_list, 10); // <= sólo 10 redes
+    scan_and_show_wifi_list(parent_list, WIFI_LIST_LIMIT);
   });
 }
