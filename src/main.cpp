@@ -12,7 +12,7 @@
 std::vector<String> availableSSIDs;
 String wifi_ssid = "";
 String wifi_password = "";
-static const int WIFI_LIST_LIMIT = 20;
+static const int WIFI_LIST_LIMIT = 10;
 
 // Enter your location
 String location = "Bahia Blanca";
@@ -409,12 +409,15 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
     lv_obj_t * btn = lv_btn_create(parent);
     lv_obj_set_width(btn, lv_pct(70));
     lv_obj_set_height(btn, 30);
-    lv_obj_center(btn);
+    //lv_obj_center(btn);
 
     lv_obj_t * label = lv_label_create(btn);
     lv_label_set_text(label, ssid.c_str());
     lv_obj_center(label);
     lv_obj_add_style(label, &style_wifi_text, 0); // aplicar estilo de fuente
+
+    lv_obj_update_layout(parent);          // recalcula layout
+    lv_obj_scroll_to_y(parent, 0, LV_ANIM_OFF);  // fuerza scroll al tope
 
     // Evento: al tocar, abrir teclado de contraseña
     lv_obj_add_event_cb(btn, [](lv_event_t * e) {
@@ -651,7 +654,7 @@ void lv_create_wifi_menu() {
   lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
 
   lv_obj_set_flex_align(list,
-    LV_FLEX_ALIGN_CENTER,  // alineación horizontal (main axis para row, cross axis para column)
+    LV_FLEX_ALIGN_START,  // alineación horizontal (main axis para row, cross axis para column)
     LV_FLEX_ALIGN_CENTER,  // alineación vertical (en tu caso no afecta mucho)
     LV_FLEX_ALIGN_CENTER   // alineación de contenido (última línea)
   );
