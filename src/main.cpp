@@ -151,6 +151,57 @@ static lv_style_t style_btn_ok;
 static bool alert_blink_state = false;
 static bool alert_active = false;
 
+// ====== Teclado: Shift (↑) mayúsculas/minúsculas ======
+static bool kb_caps = true;  // true: mayúsculas, false: minúsculas
+
+// Mapa MAYÚSCULAS (Shift reemplaza al Enter debajo de Backspace)
+static const char * KB_MAP_UPPER[] = {
+  "1","2","3","4","5","6","7","8","9","0","\n",
+  "Q","W","E","R","T","Y","U","I","O","P", LV_SYMBOL_BACKSPACE, "\n",
+  "A","S","D","F","G","H","J","K","L",     LV_SYMBOL_UP,        "\n", // <<-- Shift aquí
+  "Z","X","C","V","B","N","M",",",".","!","?","\n",
+  LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
+};
+
+// Mapa MINÚSCULAS
+static const char * KB_MAP_LOWER[] = {
+  "1","2","3","4","5","6","7","8","9","0","\n",
+  "q","w","e","r","t","y","u","i","o","p", LV_SYMBOL_BACKSPACE, "\n",
+  "a","s","d","f","g","h","j","k","l",     LV_SYMBOL_UP,        "\n", // <<-- Shift aquí
+  "z","x","c","v","b","n","m",",",".","!","?","\n",
+  LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
+};
+
+// Controles/ancho de las teclas (igual que usabas, con Shift ocupando el ancho del viejo Enter)
+static const lv_buttonmatrix_ctrl_t KB_CTRL_MAP[] = {
+  // Fila 1: 1–0 (10)
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+  // Fila 2: Q–P (10) + Backspace (1)
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_2,   // backspace más ancho
+
+  // Fila 3: A–L (9) + Shift (1)
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_2,   // Shift ancho (ocupa el lugar del Enter)
+
+  // Fila 4: Z–? (11)
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+  LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+  // Fila 5: Close, Space, OK (3)
+  LV_BUTTONMATRIX_CTRL_WIDTH_3,   // Close
+  LV_BUTTONMATRIX_CTRL_WIDTH_6,   // Space
+  LV_BUTTONMATRIX_CTRL_WIDTH_3,   // OK
+};
+
 void setup() {
   String LVGL_Arduino = String("LVGL Library Version: ") + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
   Serial.begin(115200);
@@ -316,7 +367,7 @@ void get_weather_data() {
   // Sin sensor seleccionado: estado neutro
   temperature = "--";
   humidity    = "--";
-  monoxide    = "0";
+  monoxide    = "--";
   if (text_label_sensor_name) lv_label_set_text(text_label_sensor_name, "Sin sensor");
 }
 
@@ -333,6 +384,7 @@ static void timer_cb(lv_timer_t * timer){
   
   lv_label_set_text(text_label_temperature, String("      " + temperature + degree_symbol).c_str());
   lv_label_set_text(text_label_humidity, String("   " + humidity + "%").c_str());
+  lv_label_set_text(text_label_ppm, String("   " + monoxide + " ppm").c_str());
   lv_label_set_text(text_label_time_location, (get_formatted_datetime() + " | " + location).c_str());
 
     // Verificar nivel de CO
@@ -519,12 +571,12 @@ void show_wifi_keyboard(const char * ssid) {
   selected_ssid = String(ssid);
   lv_obj_clean(lv_screen_active());
 
-  // -------- TÍTULO --------
+  // Título
   lv_obj_t * label = lv_label_create(lv_screen_active());
   lv_label_set_text_fmt(label, "%s", ssid);
   lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 10);
 
-  // -------- TEXT AREA --------
+  // Text Area (password)
   ta = lv_textarea_create(lv_screen_active());
   lv_obj_set_width(ta, lv_pct(90));
   lv_obj_set_height(ta, 50);
@@ -532,70 +584,17 @@ void show_wifi_keyboard(const char * ssid) {
   lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 40);
   lv_obj_add_state(ta, LV_STATE_FOCUSED);
 
-  // -------- MAPA Y CONTROL DEL TECLADO --------
-  static const char * kb_map[] = {
-    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "\n",
-    "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", LV_SYMBOL_BACKSPACE, "\n",
-    "A", "S", "D", "F", "G", "H", "J", "K", "L", LV_SYMBOL_NEW_LINE, "\n",
-    "Z", "X", "C", "V", "B", "N", "M", ",", ".", "!", "?", "\n",
-    LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
-  };
+  // Teclado reutilizable con Shift
+  lv_obj_t * kb_local = build_wifi_style_keyboard(lv_screen_active(), ta);
 
-  static const lv_buttonmatrix_ctrl_t kb_ctrl_map[] = {
-    // Fila 1: 1–0 (10)
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-
-    // Fila 2: Q–P (10) + Backspace (1) -> total 11
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_2,   // backspace más ancho
-
-    // Fila 3: A–L (9) + Enter (1) -> total 10
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_2,   // enter más ancho
-
-    // Fila 4: Z–? (11)
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-
-    // Fila 5: Close, Space, OK (3)
-    LV_BUTTONMATRIX_CTRL_WIDTH_3,   // Close
-    LV_BUTTONMATRIX_CTRL_WIDTH_6,   // Space (más largo)
-    LV_BUTTONMATRIX_CTRL_WIDTH_3,   // OK (igual a Close)
-  };
-
-  // -------- TECLADO --------
-  kb = lv_keyboard_create(lv_screen_active());
-  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH / 2);
-  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_USER_1, kb_map, kb_ctrl_map);
-  lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
-  lv_keyboard_set_textarea(kb, ta);
-
-  // Estilo para las teclas
-  static lv_style_t style_kb;
-  lv_style_init(&style_kb);
-  lv_style_set_pad_row(&style_kb, 2);
-  lv_style_set_pad_column(&style_kb, 2);
-  lv_style_set_height(&style_kb, 35);
-  lv_obj_add_style(kb, &style_kb, 0);
-
-  // -------- EVENTOS --------
-
-  // Botón OK
-  lv_obj_add_event_cb(kb, [](lv_event_t * e) {
+  // OK → conectar
+  lv_obj_add_event_cb(kb_local, [](lv_event_t * e) {
     String password = lv_textarea_get_text(ta);
     connect_to_wifi(selected_ssid, password);
   }, LV_EVENT_READY, NULL);
 
-  // Botón CLOSE
-  lv_obj_add_event_cb(kb, [](lv_event_t * e) {
+  // Back → volver al menú Wi‑Fi
+  lv_obj_add_event_cb(kb_local, [](lv_event_t * e) {
     lv_obj_clean(lv_screen_active());
     lv_create_wifi_menu();
   }, LV_EVENT_CANCEL, NULL);
@@ -1020,61 +1019,65 @@ static void sensor_back_btn_cb(lv_event_t * e) {
   lv_create_config_menu();
 }
 
-// ---- Teclado tipo Wi-Fi para nombrar sensores ----
+// ---- Teclado estilo Wi‑Fi (Shift ↑ NO escribe en el textarea) ----
+// ---- Teclado estilo Wi‑Fi (Shift ↑ NO se escribe porque el textarea lo rechaza) ----
 static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textarea) {
-  static const char * kb_map[] = {
-    "1","2","3","4","5","6","7","8","9","0","\n",
-    "Q","W","E","R","T","Y","U","I","O","P", LV_SYMBOL_BACKSPACE, "\n",
-    "A","S","D","F","G","H","J","K","L",     LV_SYMBOL_NEW_LINE,  "\n",
-    "Z","X","C","V","B","N","M",",",".","!","?","\n",
-    LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
-  };
+    lv_obj_t * kb = lv_keyboard_create(parent);
+    lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH / 2);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
 
-  static const lv_buttonmatrix_ctrl_t kb_ctrl_map[] = {
-    // Fila 1: 1–0 (10)
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    // Estado inicial: mayúsculas
+    kb_caps = true;
+    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_USER_1, KB_MAP_UPPER, KB_CTRL_MAP);
+    lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
 
-    // Fila 2: Q–P (10) + Backspace (1) -> total 11
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_2,   // backspace más ancho
+    // Vincular textarea
+    lv_keyboard_set_textarea(kb, textarea);
 
-    // Fila 3: A–L (9) + Enter (1) -> total 10
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_2,   // enter más ancho
+    // === Punto CLAVE: limitar caracteres aceptados por el textarea ===
+    // Armá la lista a tu gusto; acá va algo amplio para contraseñas.
+    static const char * ALLOWED =
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        " .,;-_!?#@$/\\\"'()[]{}=+*<>|%&:^~`";  // incluye espacio
+    lv_textarea_set_accepted_chars(textarea, ALLOWED);
+    // =================================================================
 
-    // Fila 4: Z–? (11)
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    // Estilo
+    static lv_style_t style_kb;
+    static bool style_inited = false;
+    if (!style_inited) {
+        style_inited = true;
+        lv_style_init(&style_kb);
+        lv_style_set_pad_row(&style_kb, 2);
+        lv_style_set_pad_column(&style_kb, 2);
+        lv_style_set_height(&style_kb, 35);
+    }
+    lv_obj_add_style(kb, &style_kb, 0);
 
-    // Fila 5: Close, Space, OK (3)
-    LV_BUTTONMATRIX_CTRL_WIDTH_3,   // Close
-    LV_BUTTONMATRIX_CTRL_WIDTH_6,   // Space (más largo)
-    LV_BUTTONMATRIX_CTRL_WIDTH_3,   // OK (igual a Close)
-  };
+    // Alternar mayúsculas/minúsculas al tocar ↑
+    lv_obj_add_event_cb(kb, [](lv_event_t * e){
+        if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
 
-  lv_obj_t * kb = lv_keyboard_create(parent);
-  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH / 2);
-  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_USER_1, kb_map, kb_ctrl_map);
-  lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
-  lv_keyboard_set_textarea(kb, textarea);
+        lv_obj_t * kb_ = (lv_obj_t *)lv_event_get_target(e);
+        uint16_t id = lv_btnmatrix_get_selected_btn(kb_);
+        if (id == LV_BTNMATRIX_BTN_NONE) return;
 
-  static lv_style_t style_kb;
-  static bool style_inited = false;
-  if (!style_inited) {
-    style_inited = true;
-    lv_style_init(&style_kb);
-    lv_style_set_pad_row(&style_kb, 2);
-    lv_style_set_pad_column(&style_kb, 2);
-    lv_style_set_height(&style_kb, 35);
-  }
-  lv_obj_add_style(kb, &style_kb, 0);
-  return kb;
+        const char * txt = lv_btnmatrix_get_btn_text(kb_, id);
+        if (!txt) return;
+
+        if (strcmp(txt, LV_SYMBOL_UP) == 0 || strcmp(txt, "Shift") == 0) {
+            kb_caps = !kb_caps;
+            if (kb_caps) {
+                lv_keyboard_set_map(kb_, LV_KEYBOARD_MODE_USER_1, KB_MAP_UPPER, KB_CTRL_MAP);
+            } else {
+                lv_keyboard_set_map(kb_, LV_KEYBOARD_MODE_USER_1, KB_MAP_LOWER, KB_CTRL_MAP);
+            }
+            // No hace falta cortar eventos; el textarea ya no aceptará ↑
+            return;
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    return kb;
 }
