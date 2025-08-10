@@ -1,8 +1,11 @@
 #include "config_menu.h"
-#include <aqs_images.h>   
+#include "dashboard.h"
+#include <aqs_images.h>
+
 static ui_simple_cb cb_back_main = nullptr;
 static ui_simple_cb cb_open_wifi = nullptr;
 static ui_simple_cb cb_open_add_sensor = nullptr;
+static void back_click_cb(lv_event_t * e);
 
 void ui_config_set_callbacks(ui_simple_cb a, ui_simple_cb b, ui_simple_cb c) {
   cb_back_main     = a;
@@ -33,9 +36,10 @@ void lv_create_config_menu() {
   lv_image_set_src(btn_back, &image_back);
   lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
   lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
-    if (cb_back_main) cb_back_main();
-  }, LV_EVENT_CLICKED, NULL);
+  lv_obj_set_ext_click_area(btn_back, 12);
+  lv_obj_move_foreground(btn_back);
+  lv_obj_add_event_cb(btn_back, back_click_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(btn_back, back_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
 
   lv_obj_t * list = lv_obj_create(scr);
   lv_obj_set_size(list, lv_pct(90), lv_pct(65));
@@ -72,4 +76,9 @@ void lv_create_config_menu() {
   lv_obj_add_event_cb(btn_sensor, [](lv_event_t * e) {
     if (cb_open_add_sensor) cb_open_add_sensor();
   }, LV_EVENT_CLICKED, NULL);
+}
+
+static void back_click_cb(lv_event_t * e){
+  (void)e;
+  if (cb_back_main) cb_back_main();   // o lv_scr_load(main_scr) si guardás un puntero
 }

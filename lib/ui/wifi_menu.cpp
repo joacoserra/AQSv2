@@ -33,29 +33,14 @@ static void show_wifi_keyboard(const char * ssid) {
     auto ta = (lv_obj_t*)lv_keyboard_get_textarea(kb);
     const char* pass = lv_textarea_get_text(ta);
 
-    lv_obj_t * status = lv_label_create(lv_screen_active());
-    lv_label_set_text(status, "Conectando...");
-    lv_obj_align(status, LV_ALIGN_CENTER, 0, 0);
+    // Tomamos el SSID del título (primer hijo de la screen)
+    const char* ssid = lv_label_get_text(lv_obj_get_child(lv_screen_active(), 0));
 
-    const char* ssid = lv_label_get_text(lv_obj_get_child(lv_screen_active(), 0)); // el title
-    wifi_connect_async(ssid, pass, status,
-      [](){ // connected
-        // pequeña pausa visual sin bloquear y volver a main
-        lv_timer_t * back = lv_timer_create_basic();
-        lv_timer_set_period(back, 700);
-        lv_timer_set_repeat_count(back, 1);
-        lv_timer_set_cb(back, [](lv_timer_t *){
-          if (cb_connected_ok) cb_connected_ok();
-        });
-      },
-      [](){ // failed
-        lv_timer_t * back = lv_timer_create_basic();
-        lv_timer_set_period(back, 1000);
-        lv_timer_set_repeat_count(back, 1);
-        lv_timer_set_cb(back, [](lv_timer_t *){
-          if (cb_back_cfg) cb_back_cfg();
-        });
-      }
+    // NUEVO: usa connect_to_wifi(...) del módulo net (no crees labels ni loops acá)
+    connect_to_wifi(
+      ssid, pass,
+      /* on_connected */ [](){ if (cb_connected_ok) cb_connected_ok(); },
+      /* on_failed    */ [](){ if (cb_back_cfg)     cb_back_cfg();     }
     );
   }, LV_EVENT_READY, NULL);
 
@@ -81,9 +66,14 @@ void lv_create_wifi_menu() {
   lv_image_set_src(btn_back, &image_back);
   lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
   lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
+  lv_obj_set_ext_click_area(btn_back, 12);
+  lv_obj_move_foreground(btn_back);
+  lv_obj_add_event_cb(btn_back, [](lv_event_t * e){
     if (cb_back_cfg) cb_back_cfg();
   }, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(btn_back, [](lv_event_t * e){
+    if (cb_back_cfg) cb_back_cfg();
+  }, LV_EVENT_SHORT_CLICKED, NULL);
 
   // Lista scrollable
   lv_obj_t * list = lv_obj_create(scr);
