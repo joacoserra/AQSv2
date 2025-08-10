@@ -133,6 +133,14 @@ static void sensor_scan_timer_cb(lv_timer_t * t);
 static void sensor_back_btn_cb(lv_event_t * e);
 static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textarea);
 
+static void refresh_ui_now();
+static void set_selected_sensor(int idx);
+static void select_next_sensor();
+static void select_prev_sensor();
+static void update_nav_arrows();
+static void auto_rotate_cb(lv_timer_t *t);
+static void ensure_auto_rotate_timer();
+
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
 static lv_obj_t * text_label_time_location;
@@ -150,6 +158,14 @@ static lv_style_t style_btn_close;
 static lv_style_t style_btn_ok;
 static bool alert_blink_state = false;
 static bool alert_active = false;
+
+// --- Navegación de sensores en pantalla única ---
+static lv_obj_t *btn_prev = nullptr;
+static lv_obj_t *btn_next = nullptr;
+static uint32_t last_user_nav_ms = 0;     // pausa autorrotación tras interacción
+#define AUTO_ROTATE_MS 0                  // 0 = off. Ej: 6000 para rotar cada 6s
+
+static lv_timer_t *auto_rotate_timer = nullptr;
 
 // ====== Teclado: Shift (↑) mayúsculas/minúsculas ======
 static bool kb_caps = true;  // true: mayúsculas, false: minúsculas
@@ -337,11 +353,14 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_text_color(text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
   // Create a timer to update the weather data every 30 seconds
-  lv_timer_t * timer = lv_timer_create(timer_cb, 30000, NULL);
+  lv_timer_t * timer = lv_timer_create(timer_cb, 5000, NULL);
   lv_timer_ready(timer);
 
   // Timer para hacer parpadear el borde si hay alerta
   lv_timer_create(alert_blink_cb, 500, NULL);  // cada 500 ms
+
+  update_nav_arrows();       // crea flechas y ajusta visibilidad
+  ensure_auto_rotate_timer(); // si AUTO_ROTATE_MS > 0
 }
 
 // Function to get weather data from the DHT sensor
@@ -410,6 +429,7 @@ static void timer_cb(lv_timer_t * timer){
     buzzer_muted = false;
     digitalWrite(BUZZER_PIN, LOW);
   }
+   update_nav_arrows();       // por si aparece el 2º sensor “en caliente”
 }
 
 String get_formatted_datetime() {
@@ -797,6 +817,8 @@ static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int 
     ack.isAck = true;
     esp_now_send(mac, (uint8_t*)&ack, sizeof(ack));
   }
+  
+  if (selectedSensorIndex < 0) selectedSensorIndex = idx;
 }
 
 // (opcional) para debugging canal WiFi
@@ -1081,4 +1103,91 @@ static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textar
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
     return kb;
+}
+
+static void refresh_ui_now() {
+  get_weather_data();
+  if (text_label_temperature)    lv_label_set_text(text_label_temperature, String("      " + temperature + degree_symbol).c_str());
+  if (text_label_humidity)       lv_label_set_text(text_label_humidity,    String("   " + humidity + "%").c_str());
+  if (text_label_ppm)            lv_label_set_text(text_label_ppm,         String("   " + monoxide + " ppm").c_str());
+  if (text_label_time_location)  lv_label_set_text(text_label_time_location, (get_formatted_datetime() + " | " + location).c_str());
+}
+
+static void set_selected_sensor(int idx) {
+  if (sensors.empty()) {
+    selectedSensorIndex = -1;
+    refresh_ui_now();
+    return;
+  }
+  // wrap-around
+  if (idx < 0) idx = (int)sensors.size() - 1;
+  if (idx >= (int)sensors.size()) idx = 0;
+
+  selectedSensorIndex = idx;
+
+  // actualizar nombre arriba
+  if (text_label_sensor_name) {
+    const auto &s = sensors[selectedSensorIndex];
+    const String &n = s.name.length() ? s.name : s.macStr;
+    lv_label_set_text(text_label_sensor_name, n.c_str());
+  }
+
+  refresh_ui_now();
+}
+
+static void select_next_sensor() { set_selected_sensor(selectedSensorIndex + 1); }
+static void select_prev_sensor() { set_selected_sensor(selectedSensorIndex - 1); }
+
+static void update_nav_arrows() {
+  // Crear si no existen (en la pantalla activa — tu principal)
+  if (!btn_prev) {
+    btn_prev = lv_btn_create(lv_screen_active());
+    lv_obj_set_size(btn_prev, 36, 36);
+    lv_obj_align(btn_prev, LV_ALIGN_TOP_LEFT, 6, 6);
+    lv_obj_add_event_cb(btn_prev, [](lv_event_t *){
+      last_user_nav_ms = millis();
+      select_prev_sensor();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(btn_prev);
+    lv_label_set_text(lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(lbl);
+  }
+
+  if (!btn_next) {
+    btn_next = lv_btn_create(lv_screen_active());
+    lv_obj_set_size(btn_next, 36, 36);
+    lv_obj_align(btn_next, LV_ALIGN_TOP_RIGHT, -6, 6);
+    lv_obj_add_event_cb(btn_next, [](lv_event_t *){
+      last_user_nav_ms = millis();
+      select_next_sensor();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(btn_next);
+    lv_label_set_text(lbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(lbl);
+  }
+
+  // Mostrar/ocultar según cantidad de sensores
+  bool show = sensors.size() >= 2;
+  if (btn_prev) (show ? lv_obj_clear_flag(btn_prev, LV_OBJ_FLAG_HIDDEN) : lv_obj_add_flag(btn_prev, LV_OBJ_FLAG_HIDDEN));
+  if (btn_next) (show ? lv_obj_clear_flag(btn_next, LV_OBJ_FLAG_HIDDEN) : lv_obj_add_flag(btn_next, LV_OBJ_FLAG_HIDDEN));
+
+  // Si aún no hay seleccionado y sí hay sensores, elegí el primero
+  if (selectedSensorIndex < 0 && sensors.size() > 0) {
+    set_selected_sensor(0);
+  }
+}
+
+static void auto_rotate_cb(lv_timer_t *t) {
+  LV_UNUSED(t);
+  if (AUTO_ROTATE_MS <= 0) return;
+  if (sensors.size() < 2)  return;
+  // Pausa 5s tras interacción manual
+  if (millis() - last_user_nav_ms < 5000) return;
+  select_next_sensor();
+}
+
+static void ensure_auto_rotate_timer() {
+  if (AUTO_ROTATE_MS > 0 && !auto_rotate_timer) {
+    auto_rotate_timer = lv_timer_create(auto_rotate_cb, AUTO_ROTATE_MS, NULL);
+  }
 }
