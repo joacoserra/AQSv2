@@ -7,6 +7,7 @@
 #include <XPT2046_Touchscreen.h>
 #include <vector>
 #include <esp_now.h>
+#include "esp_timer.h"
 
 // === Módulos nuevos ===
 #include <touch_input.h>
@@ -117,12 +118,23 @@ static lv_obj_t * main_screen = nullptr;
 static void go_to_main() { lv_scr_load(main_screen); }
 static void open_config_menu() { lv_create_config_menu(); }
 static void open_wifi_menu() { lv_create_wifi_menu(); }
+static void lv_tick_task(void* arg) { lv_tick_inc(1); }
 // open_sensor_list_screen() – si lo tenés en este archivo, poné aquí su forward:
 //static void open_sensor_list_screen();
 
 // Setup
 void setup() {
   Serial.begin(115200);
+
+  esp_timer_handle_t lv_tick_timer;
+  const esp_timer_create_args_t args = {
+    .callback = &lv_tick_task,
+    .arg = nullptr,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "lv_tick"
+  };
+  esp_timer_create(&args, &lv_tick_timer);
+  esp_timer_start_periodic(lv_tick_timer, 1000); // 1000us = 1 ms
 
   // ESP-NOW
   WiFi.mode(WIFI_STA);
@@ -155,6 +167,8 @@ void setup() {
   lv_indev_t * indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, touch_read_cb);
+  lv_timer_t* indev_timer = lv_indev_get_read_timer(indev);
+  lv_timer_set_period(indev_timer, 5);   // lee el touch cada 5 ms
 
   // Hook de mute al tocar:
   touch_on_any_press = []() -> int {
@@ -164,7 +178,7 @@ void setup() {
 
   // Callbacks de UI (módulos)
   ui_config_set_callbacks(
-    /*on_back_to_main*/ [](){ go_to_main(); },
+    /*on_back_to_main*/ [](){ lv_scr_load(lv_screen_active()); /* o tu go_to_main() */ },
     /*on_open_wifi*/    [](){ lv_create_wifi_menu(); },
     /*on_open_add_sensor*/ [](){ open_sensor_list_screen(); }
   );
@@ -191,12 +205,8 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t last = millis();
-  lv_timer_handler();               // v9
-  uint32_t now = millis();
-  lv_tick_inc(now - last);          // delta real
-  last = now;
-  delay(5);
+  lv_timer_handler();   // corre tareas/eventos LVGL
+  vTaskDelay(5); 
 }
 
 // ---------------------- TU DASHBOARD (igual que antes) ----------------------

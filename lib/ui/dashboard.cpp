@@ -134,6 +134,7 @@ static void update_nav_arrows(lv_obj_t * parent) {
 }
 
 static void settings_click_cb(lv_event_t *) {
+  Serial.println("[UI] settings click");  // debug
   lv_create_config_menu();
 }
 
@@ -225,11 +226,15 @@ static DashboardPage create_sensor_page(lv_obj_t * parent, int sensorIdx) {
   lv_obj_align(p.icon_state, LV_ALIGN_CENTER, -100, -10);
 
   // ===== Settings (abajo-izquierda, fijo en pantalla) =====
-  p.btn_settings = lv_image_create(p.cont);
+  p.btn_settings = lv_image_create(lv_screen_active());
   lv_image_set_src(p.btn_settings, &image_settings);
   lv_obj_align(p.btn_settings, LV_ALIGN_BOTTOM_LEFT, 0, 0);
   lv_obj_add_flag(p.btn_settings, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_ext_click_area(p.btn_settings, 12);
+  lv_obj_move_foreground(p.btn_settings);         // <-- importante, arriba de todo
+  // acepta CLICKED y SHORT_CLICKED por las dudas
   lv_obj_add_event_cb(p.btn_settings, settings_click_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(p.btn_settings, settings_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
 
   // Arranca oculta; show_page() activa la que corresponda
   lv_obj_add_flag(p.cont, LV_OBJ_FLAG_HIDDEN);

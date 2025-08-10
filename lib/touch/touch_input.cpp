@@ -14,7 +14,7 @@ touch_hook_t touch_on_any_press = nullptr;
 static void touch_task(void*){
   for(;;){
     TouchSample s{};
-    bool pressed = g_ts && g_ts->tirqTouched() && g_ts->touched();
+    bool pressed = g_ts && (g_ts->tirqTouched() || g_ts->touched());
     if (pressed) {
       TS_Point p = g_ts->getPoint();
       // Tus coeficientes:
@@ -38,7 +38,7 @@ void touch_start_task(void* ts, int screenW, int screenH){
   W=screenW; H=screenH;
   q = xQueueCreate(1, sizeof(TouchSample));
   xTaskCreatePinnedToCore(touch_task, "touch_task", 4096, nullptr,
-                          configMAX_PRIORITIES-1, nullptr, 0); // core 0
+                          configMAX_PRIORITIES-2, nullptr, 0); // core 0
 }
 
 void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data){
