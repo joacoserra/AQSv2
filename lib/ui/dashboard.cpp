@@ -86,8 +86,10 @@ static void ensure_styles() {
 
 static String fmt_datetime() {
   struct tm ti;
-  if (!getLocalTime(&ti)) return "00/00/0000 00:00";
-  char buf[30];
+  if (!getLocalTime(&ti)) {
+    return String("00/00/0000 00:00");
+  }
+  char buf[20];
   strftime(buf, sizeof(buf), "%d/%m/%Y %H:%M", &ti);
   return String(buf);
 }
@@ -190,7 +192,12 @@ static DashboardPage create_sensor_page(lv_obj_t * parent, int sensorIdx) {
   lv_obj_add_style(p.name, &st_title, 0);
   lv_obj_align(p.name, LV_ALIGN_TOP_MID, 0, 0);
 
-  // ===== Temperatura =====
+  // Ícono de estado
+  p.icon_state = lv_image_create(p.cont);
+  lv_image_set_src(p.icon_state, &image_cleanair);
+  lv_obj_align(p.icon_state, LV_ALIGN_CENTER, -100, -10);
+
+  // Temperatura
   p.icon_temp = lv_image_create(p.cont);
   lv_image_set_src(p.icon_temp, &image_weather_temperature);
   lv_obj_align(p.icon_temp, LV_ALIGN_CENTER, 30, -60);
@@ -200,7 +207,7 @@ static DashboardPage create_sensor_page(lv_obj_t * parent, int sensorIdx) {
   lv_obj_align(p.temp, LV_ALIGN_CENTER, 95, -60);
   lv_obj_set_style_text_font(p.temp, &lv_font_montserrat_22, 0);
 
-  // ===== Humedad =====
+  // Humedad
   p.icon_hum = lv_image_create(p.cont);
   lv_image_set_src(p.icon_hum, &image_weather_humidity);
   lv_obj_align(p.icon_hum, LV_ALIGN_CENTER, 30, 15);
@@ -210,7 +217,7 @@ static DashboardPage create_sensor_page(lv_obj_t * parent, int sensorIdx) {
   lv_obj_align(p.hum, LV_ALIGN_CENTER, 95, 15);
   lv_obj_set_style_text_font(p.hum, &lv_font_montserrat_22, 0);
 
-  // ===== Monóxido =====
+  // Monóxido
   p.icon_mono = lv_image_create(p.cont);
   lv_image_set_src(p.icon_mono, &image_monoxide);
   lv_obj_align(p.icon_mono, LV_ALIGN_CENTER, 30, 80);
@@ -220,12 +227,7 @@ static DashboardPage create_sensor_page(lv_obj_t * parent, int sensorIdx) {
   lv_obj_align(p.ppm, LV_ALIGN_CENTER, 120, 80);
   lv_obj_set_style_text_font(p.ppm, &lv_font_montserrat_22, 0);
 
-  // Estado (limpio/alerta)
-  p.icon_state = lv_image_create(p.cont);
-  lv_image_set_src(p.icon_state, &image_cleanair);
-  lv_obj_align(p.icon_state, LV_ALIGN_CENTER, -100, -10);
-
-  // SETTINGS global (hijo de la pantalla) + al frente
+  // Settings abajo-izq (hijo de pantalla y al frente)
   p.btn_settings = lv_image_create(lv_screen_active());
   lv_image_set_src(p.btn_settings, &image_settings);
   lv_obj_align(p.btn_settings, LV_ALIGN_BOTTOM_LEFT, 10, -10);
@@ -234,6 +236,13 @@ static DashboardPage create_sensor_page(lv_obj_t * parent, int sensorIdx) {
   lv_obj_move_foreground(p.btn_settings);
   lv_obj_add_event_cb(p.btn_settings, settings_click_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_add_event_cb(p.btn_settings, settings_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
+
+  text_label_time_location = lv_label_create(lv_screen_active());
+  String line = fmt_datetime() + " | " + location;
+  lv_label_set_text(text_label_time_location, line.c_str());
+  lv_obj_align(text_label_time_location, LV_ALIGN_BOTTOM_MID, 0, -10);
+  lv_obj_set_style_text_font(text_label_time_location, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
   // Arranca oculta; show_page() activa la que corresponda
   lv_obj_add_flag(p.cont, LV_OBJ_FLAG_HIDDEN);

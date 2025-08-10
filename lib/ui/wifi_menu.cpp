@@ -39,8 +39,8 @@ static void show_wifi_keyboard(const char * ssid) {
     // NUEVO: usa connect_to_wifi(...) del módulo net (no crees labels ni loops acá)
     connect_to_wifi(
       ssid, pass,
-      /* on_connected */ [](){ if (cb_connected_ok) cb_connected_ok(); },
-      /* on_failed    */ [](){ if (cb_back_cfg)     cb_back_cfg();     }
+      [](){ if (cb_connected_ok) cb_connected_ok(); }, // volver al main
+      [](){ if (cb_back_cfg) cb_back_cfg(); }          // o volver a Config si falla
     );
   }, LV_EVENT_READY, NULL);
 
@@ -68,12 +68,8 @@ void lv_create_wifi_menu() {
   lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_ext_click_area(btn_back, 12);
   lv_obj_move_foreground(btn_back);
-  lv_obj_add_event_cb(btn_back, [](lv_event_t * e){
-    if (cb_back_cfg) cb_back_cfg();
-  }, LV_EVENT_CLICKED, NULL);
-  lv_obj_add_event_cb(btn_back, [](lv_event_t * e){
-    if (cb_back_cfg) cb_back_cfg();
-  }, LV_EVENT_SHORT_CLICKED, NULL);
+  lv_obj_add_event_cb(btn_back, [](lv_event_t*){ if (cb_back_cfg) cb_back_cfg(); }, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(btn_back, [](lv_event_t*){ if (cb_back_cfg) cb_back_cfg(); }, LV_EVENT_SHORT_CLICKED, NULL);
 
   // Lista scrollable
   lv_obj_t * list = lv_obj_create(scr);

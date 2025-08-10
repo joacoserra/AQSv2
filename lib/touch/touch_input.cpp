@@ -11,15 +11,15 @@ static int W=0, H=0;
 
 touch_hook_t touch_on_any_press = nullptr;
 
-static void touch_task(void*){
+static void touch_task(void*) {
   for(;;){
     TouchSample s{};
     bool pressed = g_ts && (g_ts->tirqTouched() || g_ts->touched());
     if (pressed) {
-      TS_Point p = g_ts->getPoint();
-      // Tus coeficientes:
+      TS_Point p = g_ts->getPoint();           // <- g_ts
+      // coeficientes
       float ax=0.001f, bx=-0.130f, dx=498.426f;
-      float ay=-0.087f, by=0.001f, dy=339.434f;
+      float ay=-0.087f, by=0.001f,  dy=339.434f;
       int x = (int)(ay*p.x + by*p.y + dy);
       int y = (int)(ax*p.x + bx*p.y + dx);
       if (x<0) x=0; if (x>W-1) x=W-1;

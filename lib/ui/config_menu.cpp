@@ -79,6 +79,5 @@ void lv_create_config_menu() {
 }
 
 static void back_click_cb(lv_event_t * e){
-  (void)e;
-  if (cb_back_main) cb_back_main();   // o lv_scr_load(main_scr) si guardás un puntero
+  if (cb_back_main) cb_back_main(); // usa el callback que seteás desde main
 }

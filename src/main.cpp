@@ -95,6 +95,7 @@ static void update_page_from_sensor(DashboardPage &p);
 static void update_nav_arrows(lv_obj_t * parent);
 static lv_style_t st_title, st_value, st_unit;
 static bool styles_inited = false;
+static void lv_tick_task(void*){ lv_tick_inc(1); }
 
 // ESP-NOW
 static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int len);
@@ -118,7 +119,6 @@ static lv_obj_t * main_screen = nullptr;
 static void go_to_main() { lv_scr_load(main_screen); }
 static void open_config_menu() { lv_create_config_menu(); }
 static void open_wifi_menu() { lv_create_wifi_menu(); }
-static void lv_tick_task(void* arg) { lv_tick_inc(1); }
 // open_sensor_list_screen() – si lo tenés en este archivo, poné aquí su forward:
 //static void open_sensor_list_screen();
 
@@ -127,22 +127,18 @@ void setup() {
   Serial.begin(115200);
 
   esp_timer_handle_t lv_tick_timer;
-  const esp_timer_create_args_t args = {
-    .callback = &lv_tick_task,
-    .arg = nullptr,
-    .dispatch_method = ESP_TIMER_TASK,
-    .name = "lv_tick"
-  };
+  const esp_timer_create_args_t args{ .callback=&lv_tick_task, .arg=nullptr, .dispatch_method=ESP_TIMER_TASK, .name="lv_tick" };
   esp_timer_create(&args, &lv_tick_timer);
-  esp_timer_start_periodic(lv_tick_timer, 1000); // 1000us = 1 ms
+  esp_timer_start_periodic(lv_tick_timer, 1000); // 1 ms
 
   // ESP-NOW
   WiFi.mode(WIFI_STA);
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error inicializando ESP-NOW");
-  } else {
-    esp_now_register_recv_cb(on_espnow_recv);
-  }
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  int ch = WiFi.channel();
+  if (ch <= 0) ch = 1;                         // si no estás asociado
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
@@ -163,12 +159,13 @@ void setup() {
   lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
 
   // Touch task (core 0) + input device
+  extern XPT2046_Touchscreen touchscreen;
   touch_start_task((void*)&touchscreen, SCREEN_WIDTH, SCREEN_HEIGHT);
-  lv_indev_t * indev = lv_indev_create();
+  lv_indev_t* indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, touch_read_cb);
   lv_timer_t* indev_timer = lv_indev_get_read_timer(indev);
-  lv_timer_set_period(indev_timer, 5);   // lee el touch cada 5 ms
+  lv_timer_set_period(indev_timer, 5);
 
   // Hook de mute al tocar:
   touch_on_any_press = []() -> int {
@@ -406,6 +403,8 @@ static DashboardPage create_sensor_page(lv_obj_t * parent, int sensorIdx) {
 }
 // ---------------------- ESP-NOW RX ----------------------
 static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-  if (!mac || len != sizeof(struct_message)) return;
-  // … tu lógica actual para registrar/actualizar sensores y ACK …
+  lv_async_call([](void*){  // refrescar si la pantalla está abierta
+    extern void populate_sensor_list_if_open();
+    populate_sensor_list_if_open();
+  }, nullptr);
 }
