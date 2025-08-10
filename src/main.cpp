@@ -3,7 +3,6 @@
 #include "aqs_images.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
-//#include <DHT.h>
 #include <time.h>
 #include <XPT2046_Touchscreen.h>
 #include <vector>
@@ -42,14 +41,13 @@ static NameCtx g_name_ctx;
 
 static std::vector<DiscoveredSensor> sensors;
 static int selectedSensorIndex = -1;     // índice del sensor activo (en 'sensors'), -1 = ninguno
-static const uint32_t SENSOR_STALE_MS = 15000; // visible en listas si visto en últimos 15s
+static const uint32_t SENSOR_STALE_MS = 30000; // visible en listas si visto en últimos 15s
 
 // Label para mostrar el nombre del sensor activo
 static lv_obj_t * text_label_sensor_name = nullptr;
 
 // ====== Estado de recepción ======
 static volatile bool espnow_has_data = false;
-//static struct_message last_rx = {0};
 static uint32_t last_rx_ms = 0;
 static const uint32_t ESPNOW_TIMEOUT_MS = 15000; // 15s: si no llegan datos, usamos fallback
 
@@ -74,7 +72,6 @@ int x, y;
 #define BUZZER_PIN 15
 static bool buzzer_muted = false;
 
-
 // SET VARIABLE TO 0 FOR TEMPERATURE IN FAHRENHEIT DEGREES
 #define TEMP_CELSIUS 1
 
@@ -85,13 +82,6 @@ static bool buzzer_muted = false;
   String temperature_unit = "&temperature_unit=fahrenheit";
   const char degree_symbol[] = "\u00B0F";
 #endif
-
-// DHT sensor setup (if needed, not used in this example)
-//#define DHTPIN 22
-//#define DHTTYPE DHT22
-
-// Initialize DHT sensor
-//DHT dht(DHTPIN, DHTTYPE);
 
 // Touchscreen pins
 #define XPT2046_IRQ 27   // T_IRQ
@@ -141,6 +131,7 @@ static void open_sensor_list_screen();
 static void populate_sensor_list();
 static void sensor_scan_timer_cb(lv_timer_t * t);
 static void sensor_back_btn_cb(lv_event_t * e);
+static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textarea);
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
@@ -177,9 +168,6 @@ void setup() {
   // Initialize Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
-
-  // Initialize DHT sensor
-  //dht.begin();
 
   // Connect to Wi-Fi
   Serial.println("Esperando conexión WiFi desde menú.");
@@ -306,19 +294,26 @@ void lv_create_main_gui(void) {
 
 // Function to get weather data from the DHT sensor
 void get_weather_data() {
+  // Si hay un sensor seleccionado, mostramos su info
   if (selectedSensorIndex >= 0 && selectedSensorIndex < (int)sensors.size()) {
     const DiscoveredSensor &s = sensors[selectedSensorIndex];
     bool fresh = (millis() - s.lastSeen) <= SENSOR_STALE_MS;
+
+    // Actualizar SIEMPRE el nombre (no lo borres mientras haya sensor seleccionado)
+    if (text_label_sensor_name) {
+      lv_label_set_text(text_label_sensor_name, s.name.length() ? s.name.c_str() : s.macStr.c_str());
+    }
+
+    // Si los datos son frescos, refrescamos; si no, dejamos lo último que se venía mostrando
     if (fresh && !isnan(s.last.temp) && !isnan(s.last.float_hum)) {
       temperature = String(s.last.temp, 1);
       humidity    = String(s.last.float_hum, 1);
       monoxide    = (!isnan(s.last.mono) && s.last.mono >= 0) ? String(s.last.mono, 1) : "0";
-      // Actualizar nombre en pantalla
-      lv_label_set_text(text_label_sensor_name, s.name.length() ? s.name.c_str() : s.macStr.c_str());
-      return;
     }
+    return; // importante: no caigas al “Sin sensor”
   }
-  // Sin sensor activo o datos viejos
+
+  // Sin sensor seleccionado: estado neutro
   temperature = "--";
   humidity    = "--";
   monoxide    = "0";
@@ -843,105 +838,56 @@ static int touch_or_add_sensor(const uint8_t mac[6]) {
   }
 }
 
-// Abre la pantalla de "nombrar" un sensor (idx ya elegido)
+// Abrir pantalla de lista de sensores (y empezar escaneo)
 static void open_name_screen(size_t idx) {
   lv_obj_t * scr2 = lv_obj_create(NULL);
   lv_obj_set_size(scr2, SCREEN_WIDTH, SCREEN_HEIGHT);
   lv_scr_load(scr2);
 
-  // Título
   lv_obj_t * t2 = lv_label_create(scr2);
   lv_label_set_text_fmt(t2, "Nombrar sensor\n%s", sensors[idx].macStr.c_str());
   lv_obj_align(t2, LV_ALIGN_TOP_MID, 0, 6);
 
-  // TextArea
-  lv_obj_t * ta = lv_textarea_create(scr2);
-  lv_obj_set_width(ta, lv_pct(90));
-  lv_obj_set_height(ta, 50);
-  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 60);
-  lv_textarea_set_placeholder_text(ta, "Ej: Cocina");
-  if (sensors[idx].name.length()) lv_textarea_set_text(ta, sensors[idx].name.c_str());
-  lv_obj_add_state(ta, LV_STATE_FOCUSED);
+  lv_obj_t * ta_local = lv_textarea_create(scr2);
+  lv_obj_set_width(ta_local, lv_pct(90));
+  lv_obj_set_height(ta_local, 50);
+  lv_obj_align(ta_local, LV_ALIGN_TOP_MID, 0, 60);
+  lv_textarea_set_placeholder_text(ta_local, "Ej: Cocina");
+  if (sensors[idx].name.length()) lv_textarea_set_text(ta_local, sensors[idx].name.c_str());
+  lv_obj_add_state(ta_local, LV_STATE_FOCUSED);
 
-  // Teclado
-  lv_obj_t * kb = lv_keyboard_create(scr2);
-  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH/2);
-  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_keyboard_set_textarea(kb, ta);
+  // Teclado estilo Wi‑Fi (mismo mapa y botones Back/OK)
+  lv_obj_t * kb_local = build_wifi_style_keyboard(scr2, ta_local);
 
-  // Preparar contexto a pasar por user_data
-  g_name_ctx.ta  = ta;
-  g_name_ctx.idx = idx;
+  // Guardamos el índice en user_data del teclado
+  lv_obj_set_user_data(kb_local, (void*)idx);
 
-  // Eventos del teclado (OK y CANCEL)
-  extern void kb_name_ok_cb(lv_event_t * e);
-  extern void kb_name_cancel_cb(lv_event_t * e);
-  lv_obj_add_event_cb(kb, kb_name_ok_cb, LV_EVENT_READY,  &g_name_ctx);
-  lv_obj_add_event_cb(kb, kb_name_cancel_cb, LV_EVENT_CANCEL, &g_name_ctx);
-}
-
-// Al tocar un sensor de la lista: pantalla para nombrar y seleccionar
-static void sensor_btn_clicked_cb(lv_event_t * e) {
-  lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
-  size_t idx = (size_t)lv_obj_get_user_data(btn);
-
-  // —— pantalla de “nombrar” (igual a lo que ya tenías) ——
-  lv_obj_t * scr2 = lv_obj_create(NULL);
-  lv_obj_set_size(scr2, SCREEN_WIDTH, SCREEN_HEIGHT);
-  lv_scr_load(scr2);
-
-  lv_obj_t * t2 = lv_label_create(scr2);
-  lv_label_set_text_fmt(t2, "Nombrar sensor\n%s", sensors[idx].macStr.c_str());
-  lv_obj_align(t2, LV_ALIGN_TOP_MID, 0, 6);
-
-  lv_obj_t * ta = lv_textarea_create(scr2);
-  lv_obj_set_width(ta, lv_pct(90));
-  lv_obj_set_height(ta, 50);
-  lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 60);
-  lv_textarea_set_placeholder_text(ta, "Ej: Cocina");
-  if (sensors[idx].name.length()) lv_textarea_set_text(ta, sensors[idx].name.c_str());
-  lv_obj_add_state(ta, LV_STATE_FOCUSED);
-
-  lv_obj_t * kb = lv_keyboard_create(scr2);
-  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH/2);
-  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_keyboard_set_textarea(kb, ta);
-
-  // OK: guardar nombre y seleccionar sensor activo
-  lv_obj_add_event_cb(kb, [](lv_event_t * e3) {
-    // Recuperar objetos desde el árbol (simple y efectivo)
+  // OK = LV_EVENT_READY
+  lv_obj_add_event_cb(kb_local, [](lv_event_t * e3) {
     lv_obj_t * kb_ = (lv_obj_t *)lv_event_get_target(e3);
-    lv_obj_t * ta_ = (lv_obj_t *)lv_keyboard_get_textarea(kb_);
-    String name = String(lv_textarea_get_text(ta_));
-
-    // Pequeño truco: guardamos idx en user_data del teclado cuando lo creamos
     size_t idx_ = (size_t)lv_obj_get_user_data(kb_);
+    lv_obj_t * ta_ = (lv_obj_t *)lv_keyboard_get_textarea(kb_);
 
-    sensors[idx_].name = name;
+    sensors[idx_].name = String(lv_textarea_get_text(ta_));
     selectedSensorIndex = (int)idx_;
 
-    // Volver a principal y actualizar
     lv_scr_load(main_screen);
     if (text_label_sensor_name) {
       const String &n = sensors[idx_].name;
       lv_label_set_text(text_label_sensor_name, n.length() ? n.c_str() : sensors[idx_].macStr.c_str());
     }
-
-    // Asegurar que el timer de escaneo se detenga si quedó
-    if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
-    if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
-    sensor_list_container = nullptr;
-
   }, LV_EVENT_READY, NULL);
 
-  // Guardar idx en user_data del teclado para leerlo en READY
-  lv_obj_set_user_data(kb, (void*)idx);
-
-  // CANCEL: volver a la lista (y retomar el escaneo)
-  lv_obj_add_event_cb(kb, [](lv_event_t * e3) {
-    // Volvemos a la lista
-    open_sensor_list_screen();
+  // Back = LV_EVENT_CANCEL
+  lv_obj_add_event_cb(kb_local, [](lv_event_t * e3) {
+    open_sensor_list_screen(); // vuelve a la lista y sigue escaneando
   }, LV_EVENT_CANCEL, NULL);
+}
+
+// Al tocar un sensor de la lista: pantalla para nombrar y seleccionar
+static void sensor_btn_clicked_cb(lv_event_t * e) {
+  size_t idx = (size_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
+  open_name_screen(idx);
 }
 
 // Callback del botón OK del teclado de “nombrar”
@@ -1038,7 +984,10 @@ static void populate_sensor_list() {
 
     // Guardar índice como user_data y conectar callback
     lv_obj_set_user_data(btn, (void*)i);
-    lv_obj_add_event_cb(btn, sensor_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn, [](lv_event_t * e) {
+    size_t idx = (size_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
+    open_name_screen(idx); // <-- usa la pantalla con teclado estilo Wi‑Fi
+    }, LV_EVENT_CLICKED, NULL);
 
     shown++;
   }
@@ -1069,4 +1018,63 @@ static void sensor_back_btn_cb(lv_event_t * e) {
   if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
   sensor_list_container = nullptr;
   lv_create_config_menu();
+}
+
+// ---- Teclado tipo Wi-Fi para nombrar sensores ----
+static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textarea) {
+  static const char * kb_map[] = {
+    "1","2","3","4","5","6","7","8","9","0","\n",
+    "Q","W","E","R","T","Y","U","I","O","P", LV_SYMBOL_BACKSPACE, "\n",
+    "A","S","D","F","G","H","J","K","L",     LV_SYMBOL_NEW_LINE,  "\n",
+    "Z","X","C","V","B","N","M",",",".","!","?","\n",
+    LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
+  };
+
+  static const lv_buttonmatrix_ctrl_t kb_ctrl_map[] = {
+    // Fila 1: 1–0 (10)
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+    // Fila 2: Q–P (10) + Backspace (1) -> total 11
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_2,   // backspace más ancho
+
+    // Fila 3: A–L (9) + Enter (1) -> total 10
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_2,   // enter más ancho
+
+    // Fila 4: Z–? (11)
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+    LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+    // Fila 5: Close, Space, OK (3)
+    LV_BUTTONMATRIX_CTRL_WIDTH_3,   // Close
+    LV_BUTTONMATRIX_CTRL_WIDTH_6,   // Space (más largo)
+    LV_BUTTONMATRIX_CTRL_WIDTH_3,   // OK (igual a Close)
+  };
+
+  lv_obj_t * kb = lv_keyboard_create(parent);
+  lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH / 2);
+  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_USER_1, kb_map, kb_ctrl_map);
+  lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
+  lv_keyboard_set_textarea(kb, textarea);
+
+  static lv_style_t style_kb;
+  static bool style_inited = false;
+  if (!style_inited) {
+    style_inited = true;
+    lv_style_init(&style_kb);
+    lv_style_set_pad_row(&style_kb, 2);
+    lv_style_set_pad_column(&style_kb, 2);
+    lv_style_set_height(&style_kb, 35);
+  }
+  lv_obj_add_style(kb, &style_kb, 0);
+  return kb;
 }
