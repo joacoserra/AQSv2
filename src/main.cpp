@@ -265,6 +265,7 @@ void lv_create_main_gui(void) {
   LV_IMAGE_DECLARE(image_monoxide);
   LV_IMAGE_DECLARE(image_cleanair);
   LV_IMAGE_DECLARE(image_alert);
+  LV_IMAGE_DECLARE(image_warning);
   LV_IMAGE_DECLARE(image_settings);
 
   get_weather_data();
@@ -285,7 +286,7 @@ void lv_create_main_gui(void) {
   // ---------- ÍCONO DE ESTADO ----------
   image_status_icon = lv_image_create(lv_screen_active());
   lv_image_set_src(image_status_icon, &image_cleanair);
-  lv_obj_align(image_status_icon, LV_ALIGN_CENTER, -80, -20);
+  lv_obj_align(image_status_icon, LV_ALIGN_CENTER, -100, -10);
 
   // Temperature Icon
   lv_obj_t * weather_image_temperature = lv_image_create(lv_screen_active());
@@ -499,15 +500,15 @@ void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
 }
 
 void lv_create_splash_screen() {
-  LV_IMAGE_DECLARE(image_init);
+  LV_IMAGE_DECLARE(image_cleanair);
 
   splash_screen = lv_screen_active();
   lv_obj_t * img = lv_image_create(splash_screen);
-  lv_image_set_src(img, &image_init);
+  lv_image_set_src(img, &image_cleanair);
   lv_obj_align(img, LV_ALIGN_CENTER, 0, -30);
   lv_obj_t * label = lv_label_create(splash_screen);
   lv_label_set_text(label, "Air Quality System");
-  lv_obj_align(label, LV_ALIGN_CENTER, 0, 60);
+  lv_obj_align(label, LV_ALIGN_CENTER, 0, 80);
   lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
   splash_timer = lv_timer_create([](lv_timer_t * timer) {
     lv_obj_clean(lv_screen_active());
