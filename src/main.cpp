@@ -169,6 +169,7 @@ static float mq7_adc_to_ppm(int raw);
 static void read_local_sensors();
 static void set_status_icon(lv_obj_t *icon, float ppm);
 static void go_to_page(int idx, bool anim=false);
+static lv_obj_t * make_back_button(lv_obj_t *parent, lv_align_t align, lv_coord_t offx, lv_coord_t offy, lv_event_cb_t cb);
 
 static void refresh_ui_now();
 static void set_selected_sensor(int idx);
@@ -195,6 +196,13 @@ static bool alert_blink_state = false;
 static bool alert_active = false;
 static lv_obj_t * local_page_root = nullptr;
 static volatile bool g_need_page_sync = false;
+
+static lv_timer_t * ui_timer = nullptr;
+static lv_timer_t * blink_timer = nullptr;
+static inline void pause_main_timers(bool pause) {
+  if (ui_timer)  (pause ? lv_timer_pause(ui_timer)  : lv_timer_resume(ui_timer));
+  if (blink_timer)(pause ? lv_timer_pause(blink_timer): lv_timer_resume(blink_timer));
+}
 
 // --- Navegación de sensores en pantalla única ---
 static lv_obj_t *btn_prev = nullptr;
@@ -286,6 +294,10 @@ void setup() {
   // Register print function for debugging
   lv_log_register_print_cb(log_print);
 
+  pinMode(XPT2046_CS, OUTPUT);
+  digitalWrite(XPT2046_CS, HIGH);
+  pinMode(XPT2046_IRQ, INPUT_PULLUP);
+
   // Start the SPI for the touchscreen and init the touchscreen
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   touchscreen.begin(touchscreenSPI);
@@ -304,6 +316,7 @@ void setup() {
 
   // Initialize an LVGL input device object (Touchscreen)
   lv_indev_t * indev = lv_indev_create();
+  
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   // Set the callback function to read Touchscreen input
   lv_indev_set_read_cb(indev, touchscreen_read);
@@ -314,7 +327,8 @@ void setup() {
 }
 
 void loop() {
-  lv_task_handler();  // let the GUI do its work
+  //lv_task_handler();  // let the GUI do its work
+  lv_timer_handler();
   lv_tick_inc(5);     // tell LVGL how much time has passed
   delay(5);           // let this time pass
 }
@@ -375,9 +389,9 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_text_color(text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
   // Timers
-  lv_timer_t * timer = lv_timer_create(timer_cb, 2000, NULL);  // refresco 2s
-  lv_timer_ready(timer);
-  lv_timer_create(alert_blink_cb, 500, NULL);
+  ui_timer   = lv_timer_create(timer_cb, 2000, NULL);
+  lv_timer_ready(ui_timer);
+  blink_timer = lv_timer_create(alert_blink_cb, 500, NULL);
 
   update_nav_arrows_pages();
   ensure_auto_rotate_timer();
@@ -553,53 +567,83 @@ static void alert_blink_cb(lv_timer_t * timer) {
 
 // Get the Touchscreen data
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
-  if(touchscreen.tirqTouched() && touchscreen.touched()) {
-    // Get Touchscreen points
+  static bool    s_pressed_last = false;
+  static uint32_t s_last_touch_ms = 0;
+  static int16_t s_last_x = 0, s_last_y = 0;
+
+  // Si el IRQ no dice “tocado”, igual mantenemos el estado un instante (debounce release)
+  const uint32_t now = millis();
+  bool raw_pressed = (touchscreen.tirqTouched() || touchscreen.touched());
+
+  // Recolectar N muestras rápidas si “parece” que hay toque
+  const int N = raw_pressed ? 4 : 0;
+  int xs[N], ys[N];
+  int n_ok = 0;
+
+  for (int i = 0; i < N; ++i) {
     TS_Point p = touchscreen.getPoint();
 
-    // Advanced Touchscreen calibration, LEARN MORE » https://RandomNerdTutorials.com/touchscreen-calibration/
-    float alpha_x, beta_x, alpha_y, beta_y, delta_x, delta_y;
+    // --- Calibración tuya ---
+    float alpha_x = 0.001f, beta_x = -0.130f, delta_x = 498.426f;
+    float alpha_y = -0.087f, beta_y = 0.001f,  delta_y = 339.434f;
+    int x = (int)(alpha_y * p.x + beta_y * p.y + delta_y);
+    int y = (int)(alpha_x * p.x + beta_x * p.y + delta_x);
+    if (x < 0) x = 0; if (x > SCREEN_WIDTH  - 1) x = SCREEN_WIDTH  - 1;
+    if (y < 0) y = 0; if (y > SCREEN_HEIGHT - 1) y = SCREEN_HEIGHT - 1;
 
-    // REPLACE WITH YOUR OWN CALIBRATION VALUES » https://RandomNerdTutorials.com/touchscreen-calibration/
-    alpha_x = 0.001;
-    beta_x = -0.130;
-    delta_x = 498.426;
-    alpha_y = -0.087;
-    beta_y = 0.001;
-    delta_y = 339.434;
+    xs[n_ok] = x;
+    ys[n_ok] = y;
+    n_ok++;
 
-    x = alpha_y * p.x + beta_y * p.y + delta_y;
-    // clamp x between 0 and SCREEN_WIDTH - 1
-    x = max(0, x);
-    x = min(SCREEN_WIDTH - 1, x);
+    // micro‑sleep cortita para no bloquear LVGL pero permitir variación mínima
+    delayMicroseconds(200);
+  }
 
-    y = alpha_x * p.x + beta_x * p.y + delta_x;
-    // clamp y between 0 and SCREEN_HEIGHT - 1
-    y = max(0, y);
-    y = min(SCREEN_HEIGHT - 1, y);
+  auto median3 = [](int *v, int n) -> int {
+    // n es 3 o 4; tomamos mediana “simple”
+    if (n <= 0) return 0;
+    // insertion sort chico
+    for (int i=1;i<n;i++){int k=v[i],j=i-1;while(j>=0 && v[j]>k){v[j+1]=v[j];j--;}v[j+1]=k;}
+    return v[n/2];
+  };
 
+  bool pressed = false;
+  int rx=0, ry=0;
+
+  if (n_ok >= 3) {
+    rx = median3(xs, n_ok);
+    ry = median3(ys, n_ok);
+    // “Consistencia”: si la dispersión es muy alta, lo tomamos como no‑toque
+    int dx = xs[n_ok-1] - xs[0];
+    int dy = ys[n_ok-1] - ys[0];
+    if (abs(dx) < 15 && abs(dy) < 15) pressed = true; // ajustá 15–25 px si hiciera falta
+  }
+
+  // Debounce de release: mantener PRESSED ~30 ms tras “soltar”
+  const uint32_t RELEASE_HOLD_MS = 30;
+  if (!pressed && s_pressed_last && (now - s_last_touch_ms) <= RELEASE_HOLD_MS) {
+    pressed = true;
+    rx = s_last_x; ry = s_last_y;
+  }
+
+  // Actualizar estados
+  if (pressed) {
+    s_last_touch_ms = now;
+    s_last_x = rx; s_last_y = ry;
     data->state = LV_INDEV_STATE_PRESSED;
+    data->point.x = rx;
+    data->point.y = ry;
 
-    // Set the coordinates
-    data->point.x = x;
-    data->point.y = y;
-
-    // Si hay alerta, cualquier toque silencia el buzzer
-    if (alert_active) {
-      buzzer_muted = true;
-      digitalWrite(BUZZER_PIN, LOW);
-    }
-
-    // Print Touchscreen info about X, Y and Pressure (Z) on the Serial Monitor
-    //Serial.print("X = ");
-    //Serial.print(x);
-    //Serial.print(" | Y = ");
-    //Serial.print(y);
-    //Serial.println();
-  }
-  else {
+    // Silenciar buzzer si hay alerta activa
+    if (alert_active) { buzzer_muted = true; digitalWrite(BUZZER_PIN, LOW); }
+  } else {
     data->state = LV_INDEV_STATE_RELEASED;
+    // Último punto se puede dejar (LVGL lo ignora en RELEASE)
+    data->point.x = s_last_x;
+    data->point.y = s_last_y;
   }
+
+  s_pressed_last = pressed;
 }
 
 void lv_create_splash_screen() {
@@ -673,6 +717,8 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
 }
 
 void show_wifi_keyboard(const char * ssid) {
+  pause_main_timers(true);
+
   selected_ssid = String(ssid);
   lv_obj_clean(lv_screen_active());
 
@@ -726,7 +772,9 @@ void connect_to_wifi(String ssid, String password) {
     lv_label_set_text(label, "¡Conectado!");
     delay(2000);
     lv_scr_load(main_screen);  // Volver a la pantalla principal
+    pause_main_timers(false);
   } else {
+    Serial.println("Error al conectar");
     lv_label_set_text(label, "Error al conectar");
     delay(2000);
     lv_obj_clean(lv_screen_active());
@@ -735,7 +783,7 @@ void connect_to_wifi(String ssid, String password) {
 }
 
 void lv_create_config_menu() {
-  LV_IMAGE_DECLARE(image_back);
+  pause_main_timers(true);
 
   static lv_style_t style_btn_text;
   static bool style_btn_text_inited = false;
@@ -756,13 +804,10 @@ void lv_create_config_menu() {
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
   // Botón Volver
-  lv_obj_t * btn_back = lv_image_create(config_screen);
-  lv_image_set_src(btn_back, &image_back);
-  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
-  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
-    lv_scr_load(main_screen);
-  }, LV_EVENT_CLICKED, NULL);
+  make_back_button(config_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, [](lv_event_t * e){
+  lv_scr_load(main_screen);
+  pause_main_timers(false);
+  });
 
   // Contenedor para opciones (columna)
   lv_obj_t * list = lv_obj_create(config_screen);
@@ -804,7 +849,7 @@ void lv_create_config_menu() {
 }
 
 void lv_create_wifi_menu() {
-  LV_IMAGE_DECLARE(image_back);
+  pause_main_timers(true);
 
   lv_obj_t * wifi_screen = lv_obj_create(NULL);
   lv_obj_set_size(wifi_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -816,13 +861,9 @@ void lv_create_wifi_menu() {
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
   // Botón Volver
-  lv_obj_t * btn_back = lv_image_create(wifi_screen);
-  lv_image_set_src(btn_back, &image_back);
-  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
-  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(btn_back, [](lv_event_t * e) {
-    lv_create_config_menu();
-  }, LV_EVENT_CLICKED, NULL);
+  make_back_button(wifi_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, [](lv_event_t * e){
+  lv_create_config_menu();
+  });
 
   // Contenedor scrollable para la lista
   lv_obj_t * list = lv_obj_create(wifi_screen);
@@ -980,6 +1021,7 @@ static void open_name_screen(size_t idx) {
     selectedSensorIndex = (int)idx_;
 
     lv_scr_load(main_screen);
+    pause_main_timers(false);
     if (text_label_sensor_name) {
       const String &n = sensors[idx_].name;
       lv_label_set_text(text_label_sensor_name, n.length() ? n.c_str() : sensors[idx_].macStr.c_str());
@@ -1009,6 +1051,7 @@ void kb_name_ok_cb(lv_event_t * e) {
 
   // Volver a principal y actualizar etiqueta
   lv_scr_load(main_screen);
+  pause_main_timers(false);
   if (text_label_sensor_name) {
     const String &n = sensors[ctx->idx].name;
     lv_label_set_text(text_label_sensor_name, n.length() ? n.c_str() : sensors[ctx->idx].macStr.c_str());
@@ -1023,7 +1066,6 @@ void kb_name_cancel_cb(lv_event_t * e) {
 
 // Crea/abre la pantalla con la lista de sensores detectados
 static void open_sensor_list_screen() {
-  // Cerrar pantalla previa (si existía) y matar timer previo
   if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
   if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
 
@@ -1036,13 +1078,9 @@ static void open_sensor_list_screen() {
   lv_label_set_text(title, "Sensores disponibles");
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
-  // Botón Volver (usa tu ícono 'image_back' si querés)
-  LV_IMAGE_DECLARE(image_back);
-  lv_obj_t * btn_back = lv_image_create(sensor_list_screen);
-  lv_image_set_src(btn_back, &image_back);
-  lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
-  lv_obj_add_flag(btn_back, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(btn_back, sensor_back_btn_cb, LV_EVENT_CLICKED, NULL);
+  // Botón Volver
+  make_back_button(sensor_list_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, sensor_back_btn_cb);
+ 
 
   // Contenedor scrollable (lista)
   sensor_list_container = lv_obj_create(sensor_list_screen);
@@ -1131,11 +1169,12 @@ static void sensor_back_btn_cb(lv_event_t * e) {
 // ---- Teclado estilo Wi‑Fi (Shift ↑ NO escribe en el textarea) ----
 // ---- Teclado estilo Wi‑Fi (Shift ↑ NO se escribe porque el textarea lo rechaza) ----
 static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textarea) {
+    // Crear teclado
     lv_obj_t * kb = lv_keyboard_create(parent);
     lv_obj_set_size(kb, SCREEN_HEIGHT, SCREEN_WIDTH / 2);
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
 
-    // Estado inicial: mayúsculas
+    // Estado inicial: MAYÚSCULAS en mapa USER_1
     kb_caps = true;
     lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_USER_1, KB_MAP_UPPER, KB_CTRL_MAP);
     lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
@@ -1143,17 +1182,15 @@ static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textar
     // Vincular textarea
     lv_keyboard_set_textarea(kb, textarea);
 
-    // === Punto CLAVE: limitar caracteres aceptados por el textarea ===
-    // Armá la lista a tu gusto; acá va algo amplio para contraseñas.
+    // Aceptar solo estos caracteres en el textarea (ajustá a gusto)
     static const char * ALLOWED =
         "abcdefghijklmnopqrstuvwxyz"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "0123456789"
-        " .,;-_!?#@$/\\\"'()[]{}=+*<>|%&:^~`";  // incluye espacio
+        " .,;-_!?#@$/\\\"'()[]{}=+*<>|%&:^~`";
     lv_textarea_set_accepted_chars(textarea, ALLOWED);
-    // =================================================================
 
-    // Estilo
+    // Estilo del teclado (teclas más compactas)
     static lv_style_t style_kb;
     static bool style_inited = false;
     if (!style_inited) {
@@ -1165,27 +1202,49 @@ static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textar
     }
     lv_obj_add_style(kb, &style_kb, 0);
 
-    // Alternar mayúsculas/minúsculas al tocar ↑
+    // Sin animación para sensación más “snappy” al escribir
+    lv_obj_set_style_anim_time(kb, 0, 0);
+    lv_obj_set_style_anim_time(textarea, 0, 0);
+
+    // === Anti-duplicados + SHIFT correcto ===
     lv_obj_add_event_cb(kb, [](lv_event_t * e){
         if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
 
         lv_obj_t * kb_ = (lv_obj_t *)lv_event_get_target(e);
-        uint16_t id = lv_btnmatrix_get_selected_btn(kb_);
-        if (id == LV_BTNMATRIX_BTN_NONE) return;
 
-        const char * txt = lv_btnmatrix_get_btn_text(kb_, id);
-        if (!txt) return;
+        // ID del botón actual (API LVGL 9.3)
+        uint16_t id = lv_buttonmatrix_get_selected_button(kb_);
+        if (id == 0xFFFF) return; // NONE (evita macros faltantes)
 
-        if (strcmp(txt, LV_SYMBOL_UP) == 0 || strcmp(txt, "Shift") == 0) {
-            kb_caps = !kb_caps;
-            if (kb_caps) {
-                lv_keyboard_set_map(kb_, LV_KEYBOARD_MODE_USER_1, KB_MAP_UPPER, KB_CTRL_MAP);
-            } else {
-                lv_keyboard_set_map(kb_, LV_KEYBOARD_MODE_USER_1, KB_MAP_LOWER, KB_CTRL_MAP);
-            }
-            // No hace falta cortar eventos; el textarea ya no aceptará ↑
+        // Anti-duplicado: ignora la MISMA tecla repetida en <120 ms
+        static uint16_t last_id = 0xFFFF;
+        static uint32_t last_ts = 0;
+        uint32_t now = lv_tick_get();
+        if (id == last_id && (now - last_ts) < 120) {
+            lv_event_stop_bubbling(e);
+            lv_event_stop_processing(e);
             return;
         }
+        last_id = id;
+        last_ts = now;
+
+        // Texto de la tecla (API LVGL 9.3)
+        const char * txt = lv_buttonmatrix_get_button_text(kb_, id);
+        if (!txt) return;
+
+        // SHIFT: alterna mapa y NO escribe nada en el textarea
+        if (strcmp(txt, LV_SYMBOL_UP) == 0 || strcmp(txt, "Shift") == 0) {
+            kb_caps = !kb_caps;
+            lv_keyboard_set_map(
+                kb_, LV_KEYBOARD_MODE_USER_1,
+                kb_caps ? KB_MAP_UPPER : KB_MAP_LOWER,
+                KB_CTRL_MAP
+            );
+            lv_event_stop_bubbling(e);
+            lv_event_stop_processing(e);
+            return;
+        }
+        // Cualquier otra tecla: dejar fluir hacia el textarea
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
     return kb;
@@ -1410,4 +1469,23 @@ static void go_to_page(int idx, bool anim) {
     if (at_last)  lv_obj_add_state(btn_next, LV_STATE_DISABLED);
     else          lv_obj_clear_state(btn_next, LV_STATE_DISABLED);
   }
+}
+
+// Botón “volver” reutilizable con flecha < (LVGL 9.3)
+static lv_obj_t * make_back_button(lv_obj_t *parent, lv_align_t align, lv_coord_t offx, lv_coord_t offy, lv_event_cb_t cb) {
+  lv_obj_t *btn = lv_btn_create(parent);
+  lv_obj_set_size(btn, 36, 36);                  // mismo tamaño que flechas de sensores
+  lv_obj_align(btn, align, offx, offy);
+  lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+  // (opcional) estilo simple
+  lv_obj_set_style_radius(btn, 8, 0);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_20, 0);
+  lv_obj_set_style_border_width(btn, 0, 0);
+  lv_obj_set_style_pad_all(btn, 4, 0);
+
+  lv_obj_t *lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, LV_SYMBOL_LEFT);
+  lv_obj_center(lbl);
+  return btn;
 }
