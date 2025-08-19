@@ -7,6 +7,13 @@
 #include <XPT2046_Touchscreen.h>
 #include <vector>
 #include <esp_now.h>
+#include <DHT.h>
+#include <MQ7.h>
+
+// Globals
+static lv_display_t *g_disp = nullptr;
+static lv_coord_t SW = 0, SH = 0;
+static int g_curr_page = 0;
 
 // ====== Paquete idéntico al EMISOR ======
 typedef struct struct_message {
@@ -31,6 +38,27 @@ struct DiscoveredSensor {
 static lv_obj_t * sensor_list_screen = nullptr;
 static lv_obj_t * sensor_list_container = nullptr;
 static lv_timer_t * sensor_scan_timer = nullptr;
+
+static lv_obj_t * pages = nullptr;
+
+struct PageWidgets {
+  lv_obj_t *name = nullptr;
+  lv_obj_t *icon = nullptr;
+  lv_obj_t *t   = nullptr;  // temperatura
+  lv_obj_t *h   = nullptr;  // humedad
+  lv_obj_t *co  = nullptr;  // ppm
+};
+
+static PageWidgets local_page;                // página 0 (local)
+static std::vector<PageWidgets> remote_pages; // 1:1 con 'sensors' por índice
+
+// Pines sensores locales
+#define DHTPIN  22
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+#define MQ7_PIN 34  // ADC para MQ7 (ajusta si usas otro)
+static float local_t = NAN, local_h = NAN, local_co = NAN; // últimos valores locales
 
 // === Contexto para nombrar sensor ===
 struct NameCtx {
@@ -132,12 +160,20 @@ static void populate_sensor_list();
 static void sensor_scan_timer_cb(lv_timer_t * t);
 static void sensor_back_btn_cb(lv_event_t * e);
 static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textarea);
+static lv_obj_t * create_page(lv_obj_t *parent);
+static void build_common_widgets(lv_obj_t *page, PageWidgets &w, const char *title);
+static void build_local_page();
+static void ensure_remote_page(size_t idx);
+static void update_nav_arrows_pages();
+static float mq7_adc_to_ppm(int raw);
+static void read_local_sensors();
+static void set_status_icon(lv_obj_t *icon, float ppm);
+static void go_to_page(int idx, bool anim=false);
 
 static void refresh_ui_now();
 static void set_selected_sensor(int idx);
 static void select_next_sensor();
 static void select_prev_sensor();
-static void update_nav_arrows();
 static void auto_rotate_cb(lv_timer_t *t);
 static void ensure_auto_rotate_timer();
 
@@ -145,7 +181,6 @@ static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
 static lv_obj_t * text_label_time_location;
 static lv_obj_t * text_label_ppm;
-static lv_obj_t * screen_bg;
 static lv_obj_t * image_status_icon;  // Ícono dinámico: cleanair o alert
 static lv_obj_t * splash_screen;  // pantalla temporal
 static lv_obj_t * main_screen;
@@ -158,6 +193,8 @@ static lv_style_t style_btn_close;
 static lv_style_t style_btn_ok;
 static bool alert_blink_state = false;
 static bool alert_active = false;
+static lv_obj_t * local_page_root = nullptr;
+static volatile bool g_need_page_sync = false;
 
 // --- Navegación de sensores en pantalla única ---
 static lv_obj_t *btn_prev = nullptr;
@@ -223,6 +260,9 @@ void setup() {
   Serial.begin(115200);
   Serial.println(LVGL_Arduino);
 
+  dht.begin();
+  analogReadResolution(12); // ESP32 ADC 0..4095
+
   // --- ESP-NOW ---
   WiFi.mode(WIFI_STA);
   if (esp_now_init() != ESP_OK) {
@@ -257,6 +297,11 @@ void setup() {
   disp = lv_tft_espi_create(SCREEN_WIDTH, SCREEN_HEIGHT, draw_buf, sizeof(draw_buf));
   lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
 
+  g_disp = lv_display_get_default();       // o g_disp = disp;
+  SW = lv_display_get_horizontal_resolution(g_disp);
+  SH = lv_display_get_vertical_resolution(g_disp);
+  Serial.printf("RES after rotation: %d x %d\n", (int)SW, (int)SH);
+
   // Initialize an LVGL input device object (Touchscreen)
   lv_indev_t * indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
@@ -265,7 +310,7 @@ void setup() {
 
   // Pantalla de inicio y pantalla principal
   lv_create_splash_screen();
-  main_screen = lv_screen_active();
+  //main_screen = lv_screen_active();
 }
 
 void loop() {
@@ -275,92 +320,67 @@ void loop() {
 }
 
 void lv_create_main_gui(void) {
-
-  LV_IMAGE_DECLARE(image_weather_temperature);
-  LV_IMAGE_DECLARE(image_weather_humidity);
-  LV_IMAGE_DECLARE(image_monoxide);
-  LV_IMAGE_DECLARE(image_cleanair);
-  LV_IMAGE_DECLARE(image_alert);
-  LV_IMAGE_DECLARE(image_warning);
   LV_IMAGE_DECLARE(image_settings);
 
-  get_weather_data();
+  if (pages) {                // <-- evita duplicados
+    lv_scr_load(lv_screen_active());
+    return;
+  }
 
-  // ---------- FONDO CON BORDE Y SOMBRA VERDE ----------
-  screen_bg = lv_obj_create(lv_screen_active());
-  lv_obj_set_size(screen_bg, lv_obj_get_width(lv_screen_active()), lv_obj_get_height(lv_screen_active()));
-  lv_obj_center(screen_bg);
-  lv_obj_set_style_radius(screen_bg, 0, 0);
-  lv_obj_set_style_bg_opa(screen_bg, LV_OPA_TRANSP, 0);
+  // ROOT horizontal de páginas
+  pages = lv_obj_create(lv_screen_active());
+  lv_obj_set_style_anim_time(pages, 0, 0);
+  lv_obj_set_size(pages, SW, SH);                 // <-- usar resolución real
+  lv_obj_align(pages, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_scroll_dir(pages, LV_DIR_HOR);
+  lv_obj_set_scroll_snap_x(pages, LV_SCROLL_SNAP_START);  // START evita “cortes”
+  lv_obj_set_style_pad_all(pages, 0, 0);
+  lv_obj_set_style_pad_row(pages, 0, 0);
+  lv_obj_set_style_pad_column(pages, 0, 0);
+  lv_obj_set_flex_flow(pages, LV_FLEX_FLOW_ROW);
 
-  // Nombre del sensor activo (arriba centrado)
-  text_label_sensor_name = lv_label_create(lv_screen_active());
-  lv_label_set_text(text_label_sensor_name, "Sin sensor");
-  lv_obj_align(text_label_sensor_name, LV_ALIGN_TOP_MID, 0, 8);
-  lv_obj_set_style_text_font(text_label_sensor_name, &lv_font_montserrat_22, 0);
+  lv_obj_set_scrollbar_mode(pages, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_clear_flag(pages, LV_OBJ_FLAG_SCROLL_ELASTIC);
+  lv_obj_clear_flag(pages, LV_OBJ_FLAG_SCROLL_MOMENTUM);
 
-  // ---------- ÍCONO DE ESTADO ----------
-  image_status_icon = lv_image_create(lv_screen_active());
-  lv_image_set_src(image_status_icon, &image_cleanair);
-  lv_obj_align(image_status_icon, LV_ALIGN_CENTER, -100, -10);
+  // Página 0: LOCAL
+  build_local_page();
+  // Asegurar que la primera página quede centrada/visible
+  lv_obj_update_layout(pages);
+  lv_obj_scroll_to_x(pages, 0, LV_ANIM_OFF);
+  if (local_page_root) {
+    lv_obj_scroll_to_view(local_page_root, LV_ANIM_OFF);
+  }
 
-  // Temperature Icon
-  lv_obj_t * weather_image_temperature = lv_image_create(lv_screen_active());
-  lv_image_set_src(weather_image_temperature, &image_weather_temperature);
-  lv_obj_align(weather_image_temperature, LV_ALIGN_CENTER, 30, -60);
+  lv_obj_update_layout(pages);
+  g_curr_page = 0;
+  go_to_page(0, /*anim=*/false);
 
-  text_label_temperature = lv_label_create(lv_screen_active());
-  lv_label_set_text(text_label_temperature, String("      " + temperature + degree_symbol).c_str());
-  lv_obj_align(text_label_temperature, LV_ALIGN_CENTER, 95, -60);
-  lv_obj_set_style_text_font((lv_obj_t*) text_label_temperature, &lv_font_montserrat_22, 0);
-
-  // Humidity Icon
-  lv_obj_t * weather_image_humidity = lv_image_create(lv_screen_active());
-  lv_image_set_src(weather_image_humidity, &image_weather_humidity);
-  lv_obj_align(weather_image_humidity, LV_ALIGN_CENTER, 30, 15);
-
-  text_label_humidity = lv_label_create(lv_screen_active());
-  lv_label_set_text(text_label_humidity, String("   " + humidity + "%").c_str());
-  lv_obj_align(text_label_humidity, LV_ALIGN_CENTER, 95, 15);
-  lv_obj_set_style_text_font((lv_obj_t*) text_label_humidity, &lv_font_montserrat_22, 0);
-
-  // Monoxide Icon
-  lv_obj_t * icon_monoxide = lv_image_create(lv_screen_active());
-  lv_image_set_src(icon_monoxide, &image_monoxide);  // reemplazá con tu imagen
-  lv_obj_align(icon_monoxide, LV_ALIGN_CENTER, 30, 80);
-
-  text_label_ppm = lv_label_create(lv_screen_active());
-  lv_label_set_text(text_label_ppm, String("   " + monoxide + " ppm").c_str());  // valor fijo por ahora
-  lv_obj_align(text_label_ppm, LV_ALIGN_CENTER, 120, 80);
-  lv_obj_set_style_text_font((lv_obj_t*) text_label_ppm, &lv_font_montserrat_22, 0);
-
-  // ---------- BOTÓN DE CONFIGURACIÓN ----------
+  // Botón de configuración (queda sobre la pantalla activa)
   lv_obj_t * btn_settings = lv_image_create(lv_screen_active());
   lv_image_set_src(btn_settings, &image_settings);
-  lv_obj_align(btn_settings, LV_ALIGN_BOTTOM_LEFT, 10, -10);  // esquina inferior izquierda
+  lv_obj_align(btn_settings, LV_ALIGN_BOTTOM_LEFT, 10, -10);
   lv_obj_add_flag(btn_settings, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_move_foreground(btn_settings);
   lv_obj_add_event_cb(btn_settings, [](lv_event_t * e) {
     lv_create_config_menu();
   }, LV_EVENT_CLICKED, NULL);
 
-  // Create a text label for the time and timezone aligned center in the bottom of the screen
+  // Fecha/hora (tu footer actual)
   text_label_time_location = lv_label_create(lv_screen_active());
   String datetime_str = get_formatted_datetime() + " | " + location;
   lv_label_set_text(text_label_time_location, datetime_str.c_str());
   lv_obj_align(text_label_time_location, LV_ALIGN_BOTTOM_MID, 0, -10);
-
   lv_obj_set_style_text_font(text_label_time_location, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
-  // Create a timer to update the weather data every 30 seconds
-  lv_timer_t * timer = lv_timer_create(timer_cb, 5000, NULL);
+  // Timers
+  lv_timer_t * timer = lv_timer_create(timer_cb, 2000, NULL);  // refresco 2s
   lv_timer_ready(timer);
+  lv_timer_create(alert_blink_cb, 500, NULL);
 
-  // Timer para hacer parpadear el borde si hay alerta
-  lv_timer_create(alert_blink_cb, 500, NULL);  // cada 500 ms
-
-  update_nav_arrows();       // crea flechas y ajusta visibilidad
-  ensure_auto_rotate_timer(); // si AUTO_ROTATE_MS > 0
+  update_nav_arrows_pages();
+  ensure_auto_rotate_timer();
 }
 
 // Function to get weather data from the DHT sensor
@@ -400,36 +420,91 @@ void log_print(lv_log_level_t level, const char * buf) {
 
 static void timer_cb(lv_timer_t * timer){
   LV_UNUSED(timer);
-  get_weather_data();
-  
-  lv_label_set_text(text_label_temperature, String("      " + temperature + degree_symbol).c_str());
-  lv_label_set_text(text_label_humidity, String("   " + humidity + "%").c_str());
-  lv_label_set_text(text_label_ppm, String("   " + monoxide + " ppm").c_str());
-  lv_label_set_text(text_label_time_location, (get_formatted_datetime() + " | " + location).c_str());
 
-    // Verificar nivel de CO
-  float ppm = monoxide.toFloat();
-  
-  if (ppm > 100.0) {
-    // si se acaba de entrar en alerta, reactivamos el buzzer (quitamos mute)
-    if (!alert_active) {
-      buzzer_muted = false;
-    }
-    alert_active = true;
-    lv_image_set_src(image_status_icon, &image_alert);
-  } else {
-    if (alert_active) {
-      // veníamos de alerta y se normalizó
-      lv_image_set_src(image_status_icon, &image_cleanair);
-      lv_obj_set_style_border_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
-      lv_obj_set_style_shadow_color(screen_bg, lv_palette_main(LV_PALETTE_GREEN), 0);
-    }
-    alert_active = false;
-    alert_blink_state = false;
-    buzzer_muted = false;
-    digitalWrite(BUZZER_PIN, LOW);
+  if (g_need_page_sync) {
+  for (size_t i = 0; i < sensors.size(); ++i) ensure_remote_page(i);
+  update_nav_arrows_pages();
+  lv_obj_update_layout(pages);
+  go_to_page(g_curr_page, /*anim=*/false);  // re-alinea al índice válido
+  g_need_page_sync = false;
   }
-   update_nav_arrows();       // por si aparece el 2º sensor “en caliente”
+
+
+  // 1) LOCAL
+  read_local_sensors();
+  if (local_page.t) {
+    if (isnan(local_t)) lv_label_set_text(local_page.t, "--");
+    else                lv_label_set_text_fmt(local_page.t, "%.1f%s", local_t, degree_symbol);
+  }
+  // Humedad
+  if (local_page.h) {
+    if (isnan(local_h)) lv_label_set_text(local_page.h, "--");
+    else                lv_label_set_text_fmt(local_page.h, "%.1f%%", local_h);
+  }
+  // CO
+  if (local_page.co) {
+    if (isnan(local_co)) lv_label_set_text(local_page.co, "--");
+    else                 lv_label_set_text_fmt(local_page.co, "%.0f ppm", local_co);
+  }
+  // Icono estado
+  if (local_page.icon) set_status_icon(local_page.icon, isnan(local_co) ? 0.0f : local_co);
+
+  // 2) REMOTOS (1:1 con sensors)
+  // Crear páginas faltantes (si se agregaron sensores “en caliente”)
+  for (size_t i = 0; i < sensors.size(); ++i) {
+    ensure_remote_page(i);
+  }
+
+  for (size_t i = 0; i < sensors.size(); ++i) {
+    const DiscoveredSensor &s = sensors[i];
+    PageWidgets &w = remote_pages[i];
+
+    // Nombre (si cambió)
+    if (w.name) {
+      const String title = s.name.length()? s.name : s.macStr;
+      lv_label_set_text(w.name, title.c_str());
+    }
+
+    // Datos (si hay frescos)
+    bool fresh = (millis() - s.lastSeen) <= SENSOR_STALE_MS;
+    float t = fresh && !isnan(s.last.temp)? s.last.temp : NAN;
+    float h = fresh && !isnan(s.last.float_hum)? s.last.float_hum : NAN;
+    float co = fresh && !isnan(s.last.mono)? s.last.mono : NAN;
+
+    if (w.t)  { if (isnan(t)) lv_label_set_text(w.t, "--"); else lv_label_set_text_fmt(w.t, "%.1f%s", t, degree_symbol); }
+    if (w.h)  { if (isnan(h)) lv_label_set_text(w.h, "--"); else lv_label_set_text_fmt(w.h, "%.1f%%", h); }
+    if (w.co) { if (isnan(co)) lv_label_set_text(w.co, "--"); else lv_label_set_text_fmt(w.co, "%.0f ppm", co); }
+    if (w.icon) set_status_icon(w.icon, isnan(co)? 0.0f : co);
+  }
+
+  // Footer hora/lugar
+  if (text_label_time_location) {
+    lv_label_set_text(text_label_time_location, (get_formatted_datetime() + " | " + location).c_str());
+  }
+
+  // ----- Buzzer/alerta: tomamos el estado de la página visible -----
+  // Si querés que el buzzer reaccione SIEMPRE al LOCAL, usa local_co en vez de leer la visible.
+  // Para leer la visible, calculamos el "offset" de página (0=LOCAL, 1..N=remoto idx+1):
+  // Simplificación: deja el control global como lo tenías pero con 'local_co'.
+  float ppm = isnan(local_co) ? 0.0f : local_co;  // o elegí otro criterio
+
+  if (ppm > 100.0f) {
+      if (!alert_active) buzzer_muted = false;
+      alert_active = true;
+  } else if (ppm > 10.0f) {
+      alert_active = false;
+      alert_blink_state = false;
+      buzzer_muted = false;
+      digitalWrite(BUZZER_PIN, LOW);
+  } else {
+      alert_active = false;
+      alert_blink_state = false;
+      buzzer_muted = false;
+      digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // Si se agregaron páginas, actualizá flechas
+  update_nav_arrows_pages();
 }
 
 String get_formatted_datetime() {
@@ -447,19 +522,27 @@ static void alert_blink_cb(lv_timer_t * timer) {
   LV_UNUSED(timer);
 
   if (!alert_active) {
-    // Si no hay alerta, apagamos el buzzer y salimos
     digitalWrite(BUZZER_PIN, LOW);
+    // Apagar borde si quedó encendido
+    if (pages) {
+      lv_obj_set_style_border_width(pages, 0, 0);
+      lv_obj_set_style_shadow_width(pages, 0, 0);
+    }
+    return;
+  }
+
+  // Si no existe pages aún, no hacemos nada visual
+  if (!pages) {
+    if (!buzzer_muted) digitalWrite(BUZZER_PIN, HIGH);
     return;
   }
 
   alert_blink_state = !alert_blink_state;
 
   lv_color_t color = alert_blink_state ? lv_palette_main(LV_PALETTE_RED) : lv_color_black();
-  lv_obj_set_style_border_color(screen_bg, color, 0);
-  lv_obj_set_style_shadow_color(screen_bg, color, 0);
-
-  // Activar o desactivar el buzzer
-  //digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+  lv_obj_set_style_border_width(pages, 4, 0);
+  lv_obj_set_style_border_color(pages, color, 0);
+  lv_obj_set_style_shadow_width(pages, 0, 0);
 
   if (!buzzer_muted) {
     digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
@@ -508,11 +591,11 @@ void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
     }
 
     // Print Touchscreen info about X, Y and Pressure (Z) on the Serial Monitor
-    Serial.print("X = ");
-    Serial.print(x);
-    Serial.print(" | Y = ");
-    Serial.print(y);
-    Serial.println();
+    //Serial.print("X = ");
+    //Serial.print(x);
+    //Serial.print(" | Y = ");
+    //Serial.print(y);
+    //Serial.println();
   }
   else {
     data->state = LV_INDEV_STATE_RELEASED;
@@ -533,6 +616,7 @@ void lv_create_splash_screen() {
   splash_timer = lv_timer_create([](lv_timer_t * timer) {
     lv_obj_clean(lv_screen_active());
     lv_create_main_gui();
+    main_screen = lv_screen_active();    // <-- AHORA sí guardamos la pantalla principal
     lv_timer_del(timer);
   }, 1000, NULL);
 }
@@ -785,13 +869,14 @@ void lv_create_wifi_menu() {
 
 static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   if (!mac || len != sizeof(struct_message)) return;
-
-  // Registrar/actualizar sensor visto
   int idx = touch_or_add_sensor(mac);
 
-  // Guardar último paquete
   memcpy(&sensors[idx].last, incomingData, sizeof(struct_message));
   sensors[idx].lastSeen = millis();
+
+  // Asegurá la página remota (si aún no existía)
+  //if (pages) ensure_remote_page(idx);
+  //update_nav_arrows_pages();
 
   // Log útil
   const struct_message &in = sensors[idx].last;
@@ -819,6 +904,7 @@ static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int 
   }
   
   if (selectedSensorIndex < 0) selectedSensorIndex = idx;
+  g_need_page_sync = true;   // <<-- pedir al hilo UI que sincronice páginas
 }
 
 // (opcional) para debugging canal WiFi
@@ -1138,45 +1224,6 @@ static void set_selected_sensor(int idx) {
 static void select_next_sensor() { set_selected_sensor(selectedSensorIndex + 1); }
 static void select_prev_sensor() { set_selected_sensor(selectedSensorIndex - 1); }
 
-static void update_nav_arrows() {
-  // Crear si no existen (en la pantalla activa — tu principal)
-  if (!btn_prev) {
-    btn_prev = lv_btn_create(lv_screen_active());
-    lv_obj_set_size(btn_prev, 36, 36);
-    lv_obj_align(btn_prev, LV_ALIGN_TOP_LEFT, 6, 6);
-    lv_obj_add_event_cb(btn_prev, [](lv_event_t *){
-      last_user_nav_ms = millis();
-      select_prev_sensor();
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl = lv_label_create(btn_prev);
-    lv_label_set_text(lbl, LV_SYMBOL_LEFT);
-    lv_obj_center(lbl);
-  }
-
-  if (!btn_next) {
-    btn_next = lv_btn_create(lv_screen_active());
-    lv_obj_set_size(btn_next, 36, 36);
-    lv_obj_align(btn_next, LV_ALIGN_TOP_RIGHT, -6, 6);
-    lv_obj_add_event_cb(btn_next, [](lv_event_t *){
-      last_user_nav_ms = millis();
-      select_next_sensor();
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl = lv_label_create(btn_next);
-    lv_label_set_text(lbl, LV_SYMBOL_RIGHT);
-    lv_obj_center(lbl);
-  }
-
-  // Mostrar/ocultar según cantidad de sensores
-  bool show = sensors.size() >= 2;
-  if (btn_prev) (show ? lv_obj_clear_flag(btn_prev, LV_OBJ_FLAG_HIDDEN) : lv_obj_add_flag(btn_prev, LV_OBJ_FLAG_HIDDEN));
-  if (btn_next) (show ? lv_obj_clear_flag(btn_next, LV_OBJ_FLAG_HIDDEN) : lv_obj_add_flag(btn_next, LV_OBJ_FLAG_HIDDEN));
-
-  // Si aún no hay seleccionado y sí hay sensores, elegí el primero
-  if (selectedSensorIndex < 0 && sensors.size() > 0) {
-    set_selected_sensor(0);
-  }
-}
-
 static void auto_rotate_cb(lv_timer_t *t) {
   LV_UNUSED(t);
   if (AUTO_ROTATE_MS <= 0) return;
@@ -1189,5 +1236,178 @@ static void auto_rotate_cb(lv_timer_t *t) {
 static void ensure_auto_rotate_timer() {
   if (AUTO_ROTATE_MS > 0 && !auto_rotate_timer) {
     auto_rotate_timer = lv_timer_create(auto_rotate_cb, AUTO_ROTATE_MS, NULL);
+  }
+}
+
+static lv_obj_t * create_page(lv_obj_t *parent) {
+  lv_obj_t * page = lv_obj_create(parent);
+
+  lv_obj_set_size(page, SW, SH);            // <-- 1 pantalla exacta
+  lv_obj_set_style_min_width(page, SW, 0);  // <-- por si el flex intenta encoger
+  // lv_obj_set_flex_grow(page, 0);         // asegurate de NO usar grow=1
+
+  lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(page, 0, 0);
+  lv_obj_set_style_shadow_width(page, 0, 0);
+  return page;
+}
+
+static void build_common_widgets(lv_obj_t *page, PageWidgets &w, const char *title) {
+  LV_IMAGE_DECLARE(image_weather_temperature);
+  LV_IMAGE_DECLARE(image_weather_humidity);
+  LV_IMAGE_DECLARE(image_monoxide);
+  LV_IMAGE_DECLARE(image_cleanair);
+
+  // Título (nombre)
+  w.name = lv_label_create(page);
+  lv_label_set_text(w.name, title);
+  lv_obj_align(w.name, LV_ALIGN_TOP_MID, 0, 8);
+  lv_obj_set_style_text_font(w.name, &lv_font_montserrat_22, 0);
+
+  // Icono de estado
+  w.icon = lv_image_create(page);
+  lv_image_set_src(w.icon, &image_cleanair);
+  lv_obj_align(w.icon, LV_ALIGN_CENTER, -100, -10);
+
+  // Temp
+  lv_obj_t * i_t = lv_image_create(page);
+  lv_image_set_src(i_t, &image_weather_temperature);
+  lv_obj_align(i_t, LV_ALIGN_CENTER, 30, -60);
+
+  w.t = lv_label_create(page);
+  lv_label_set_text(w.t, "--");
+  lv_obj_align(w.t, LV_ALIGN_CENTER, 95, -60);
+  lv_obj_set_style_text_font(w.t, &lv_font_montserrat_22, 0);
+
+  // Humedad
+  lv_obj_t * i_h = lv_image_create(page);
+  lv_image_set_src(i_h, &image_weather_humidity);
+  lv_obj_align(i_h, LV_ALIGN_CENTER, 30, 15);
+
+  w.h = lv_label_create(page);
+  lv_label_set_text(w.h, "--");
+  lv_obj_align(w.h, LV_ALIGN_CENTER, 95, 15);
+  lv_obj_set_style_text_font(w.h, &lv_font_montserrat_22, 0);
+
+  // CO
+  lv_obj_t * i_co = lv_image_create(page);
+  lv_image_set_src(i_co, &image_monoxide);
+  lv_obj_align(i_co, LV_ALIGN_CENTER, 30, 80);
+
+  w.co = lv_label_create(page);
+  lv_label_set_text(w.co, "--");
+  lv_obj_align(w.co, LV_ALIGN_CENTER, 120, 80);
+  lv_obj_set_style_text_font(w.co, &lv_font_montserrat_22, 0);
+}
+
+static void build_local_page() {
+  lv_obj_t * page = create_page(pages);
+  local_page_root = page;                 // <-- guardar
+  build_common_widgets(page, local_page, "LOCAL");
+}
+
+static void ensure_remote_page(size_t idx) {
+  while (remote_pages.size() < sensors.size()) remote_pages.push_back(PageWidgets{});
+  PageWidgets &w = remote_pages[idx];
+  if (w.name) return;  // ya creada
+
+  lv_obj_t * page = create_page(pages);
+  String title = sensors[idx].name.length()? sensors[idx].name : sensors[idx].macStr;
+  build_common_widgets(page, w, title.c_str());
+}
+
+static void update_nav_arrows_pages() {
+  // páginas = 1 (local) + sensores “visibles” (podés filtrar por lastSeen si querés)
+  size_t pages_count = 1 + sensors.size();
+  bool show = pages_count >= 2;
+
+  if (!btn_prev) {
+    btn_prev = lv_btn_create(lv_screen_active());
+    lv_obj_set_size(btn_prev, 36, 36);
+    lv_obj_align(btn_prev, LV_ALIGN_TOP_LEFT, 6, 6);
+    lv_obj_add_event_cb(btn_prev, [](lv_event_t *){
+      last_user_nav_ms = millis();
+      go_to_page(g_curr_page - 1, false);
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(btn_prev);
+    lv_label_set_text(lbl, LV_SYMBOL_LEFT);
+    lv_obj_center(lbl);
+  }
+  if (!btn_next) {
+    btn_next = lv_btn_create(lv_screen_active());
+    lv_obj_set_size(btn_next, 36, 36);
+    lv_obj_align(btn_next, LV_ALIGN_TOP_RIGHT, -6, 6);
+    lv_obj_add_event_cb(btn_next, [](lv_event_t *){
+      last_user_nav_ms = millis();
+      go_to_page(g_curr_page + 1, false);
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(btn_next);
+    lv_label_set_text(lbl, LV_SYMBOL_RIGHT);
+    lv_obj_center(lbl);
+  }
+
+  if (btn_prev) (show ? lv_obj_clear_flag(btn_prev, LV_OBJ_FLAG_HIDDEN) : lv_obj_add_flag(btn_prev, LV_OBJ_FLAG_HIDDEN));
+  if (btn_next) (show ? lv_obj_clear_flag(btn_next, LV_OBJ_FLAG_HIDDEN) : lv_obj_add_flag(btn_next, LV_OBJ_FLAG_HIDDEN));
+}
+
+static float mq7_adc_to_ppm(int raw) {
+  // *** Placeholder simple ***
+  // Ajustá con tu calibración: curva o tabla real del MQ7.
+  // Por ahora, mapeo lineal aproximado 0..4095 -> 0..500 ppm
+  return (float)raw * (500.0f / 4095.0f);
+}
+
+static void read_local_sensors() {
+  // DHT
+  float t = dht.readTemperature();   // °C
+  float h = dht.readHumidity();
+  if (!isnan(t)) local_t = t;
+  if (!isnan(h)) local_h = h;
+
+  // MQ7
+  int raw = analogRead(MQ7_PIN);
+  local_co = mq7_adc_to_ppm(raw);
+}
+
+static void set_status_icon(lv_obj_t *icon, float ppm) {
+  LV_IMAGE_DECLARE(image_cleanair);
+  LV_IMAGE_DECLARE(image_warning);
+  LV_IMAGE_DECLARE(image_alert);
+
+  if (ppm > 100.0f) {
+    lv_image_set_src(icon, &image_alert);
+  } else if (ppm > 10.0f) {
+    lv_image_set_src(icon, &image_warning);
+  } else {
+    lv_image_set_src(icon, &image_cleanair);
+  }
+}
+
+static void go_to_page(int idx, bool anim) {
+  if (!pages) return;
+
+  // total = 1 (LOCAL) + cantidad de sensores
+  int total = 1 + (int)sensors.size();
+
+  if (idx < 0) idx = 0;
+  if (idx >= total) idx = total - 1;
+
+  g_curr_page = idx;
+
+  // Cada "page" ocupa 100% del ancho del contenedor
+  lv_coord_t w = lv_obj_get_width(pages);
+  lv_obj_scroll_to_x(pages, (lv_coord_t)(idx * w), anim ? LV_ANIM_ON : LV_ANIM_OFF);
+
+  // Habilitar/deshabilitar flechas en los extremos
+  bool at_first = (idx == 0);
+  bool at_last  = (idx == total - 1);
+
+  if (btn_prev) {
+    if (at_first) lv_obj_add_state(btn_prev, LV_STATE_DISABLED);
+    else          lv_obj_clear_state(btn_prev, LV_STATE_DISABLED);
+  }
+  if (btn_next) {
+    if (at_last)  lv_obj_add_state(btn_next, LV_STATE_DISABLED);
+    else          lv_obj_clear_state(btn_next, LV_STATE_DISABLED);
   }
 }
