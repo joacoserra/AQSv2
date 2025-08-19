@@ -15,6 +15,9 @@ static lv_display_t *g_disp = nullptr;
 static lv_coord_t SW = 0, SH = 0;
 static int g_curr_page = 0;
 
+// Intervalo de refresco de medidas
+#define MEASURE_REFRESH_MS 5000
+
 // ====== Paquete idéntico al EMISOR ======
 typedef struct struct_message {
     char  sensor;       // 'A' o 'B'
@@ -197,6 +200,7 @@ static bool alert_active = false;
 static lv_obj_t * local_page_root = nullptr;
 static volatile bool g_need_page_sync = false;
 
+static uint32_t nav_quiet_until = 0;
 static lv_timer_t * ui_timer = nullptr;
 static lv_timer_t * blink_timer = nullptr;
 static inline void pause_main_timers(bool pause) {
@@ -389,7 +393,7 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_text_color(text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
   // Timers
-  ui_timer   = lv_timer_create(timer_cb, 2000, NULL);
+  ui_timer   = lv_timer_create(timer_cb, MEASURE_REFRESH_MS, NULL);
   lv_timer_ready(ui_timer);
   blink_timer = lv_timer_create(alert_blink_cb, 500, NULL);
 
@@ -435,15 +439,26 @@ void log_print(lv_log_level_t level, const char * buf) {
 static void timer_cb(lv_timer_t * timer){
   LV_UNUSED(timer);
 
+  // “Silencio” durante navegación o si no estoy en la pantalla principal
+  const bool quiet = ((int32_t)(nav_quiet_until - millis()) > 0) ||
+                     (lv_screen_active() != main_screen);
+
   if (g_need_page_sync) {
-  for (size_t i = 0; i < sensors.size(); ++i) ensure_remote_page(i);
-  update_nav_arrows_pages();
-  lv_obj_update_layout(pages);
-  go_to_page(g_curr_page, /*anim=*/false);  // re-alinea al índice válido
-  g_need_page_sync = false;
+    for (size_t i = 0; i < sensors.size(); ++i) ensure_remote_page(i);
+    update_nav_arrows_pages();
+    lv_obj_update_layout(pages);
+    go_to_page(g_curr_page, /*anim=*/false);
+    g_need_page_sync = false;
   }
 
-
+  if (quiet) {
+    // Sólo tareas livianas (no leer sensores)
+    if (text_label_time_location) {
+      lv_label_set_text(text_label_time_location,
+        (get_formatted_datetime() + " | " + location).c_str());
+    }
+    return;  // <<< salir sin hacer lecturas ni refrescos pesados
+  }
   // 1) LOCAL
   read_local_sensors();
   if (local_page.t) {
@@ -1384,9 +1399,11 @@ static void update_nav_arrows_pages() {
     btn_prev = lv_btn_create(lv_screen_active());
     lv_obj_set_size(btn_prev, 36, 36);
     lv_obj_align(btn_prev, LV_ALIGN_TOP_LEFT, 6, 6);
+    // Flecha izquierda
     lv_obj_add_event_cb(btn_prev, [](lv_event_t *){
       last_user_nav_ms = millis();
-      go_to_page(g_curr_page - 1, false);
+      nav_quiet_until  = millis() + 350;   // 350 ms “libres” para la UI
+      go_to_page(g_curr_page - 1, false);  // sin animación
     }, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl = lv_label_create(btn_prev);
     lv_label_set_text(lbl, LV_SYMBOL_LEFT);
@@ -1396,8 +1413,10 @@ static void update_nav_arrows_pages() {
     btn_next = lv_btn_create(lv_screen_active());
     lv_obj_set_size(btn_next, 36, 36);
     lv_obj_align(btn_next, LV_ALIGN_TOP_RIGHT, -6, 6);
+    // Flecha derecha
     lv_obj_add_event_cb(btn_next, [](lv_event_t *){
       last_user_nav_ms = millis();
+      nav_quiet_until  = millis() + 350;
       go_to_page(g_curr_page + 1, false);
     }, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl = lv_label_create(btn_next);
