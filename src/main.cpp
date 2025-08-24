@@ -16,7 +16,9 @@ static lv_coord_t SW = 0, SH = 0;
 static int g_curr_page = 0;
 
 // Intervalo de refresco de medidas
-#define MEASURE_REFRESH_MS 5000
+//#define MEASURE_REFRESH_MS 5000
+#define UI_REFRESH_MS        300 
+#define LOCAL_READ_MS        4000   // Sensores locales cada 4 s
 
 // ====== Paquete idéntico al EMISOR ======
 typedef struct struct_message {
@@ -135,7 +137,6 @@ uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 void get_weather_description(int code);
 void get_weather_data();
 void log_print(lv_log_level_t level, const char * buf);
-static void timer_cb(lv_timer_t * timer);
 void lv_create_main_gui(void);
 String get_formatted_datetime();
 static void alert_blink_cb(lv_timer_t * timer);
@@ -173,6 +174,8 @@ static void read_local_sensors();
 static void set_status_icon(lv_obj_t *icon, float ppm);
 static void go_to_page(int idx, bool anim=false);
 static lv_obj_t * make_back_button(lv_obj_t *parent, lv_align_t align, lv_coord_t offx, lv_coord_t offy, lv_event_cb_t cb);
+static void ui_timer_cb(lv_timer_t * timer);
+static void sensor_timer_cb(lv_timer_t * timer);
 
 static void refresh_ui_now();
 static void set_selected_sensor(int idx);
@@ -203,9 +206,11 @@ static volatile bool g_need_page_sync = false;
 static uint32_t nav_quiet_until = 0;
 static lv_timer_t * ui_timer = nullptr;
 static lv_timer_t * blink_timer = nullptr;
+static lv_timer_t * sensor_timer = nullptr;
 static inline void pause_main_timers(bool pause) {
-  if (ui_timer)  (pause ? lv_timer_pause(ui_timer)  : lv_timer_resume(ui_timer));
-  if (blink_timer)(pause ? lv_timer_pause(blink_timer): lv_timer_resume(blink_timer));
+  if (ui_timer)     (pause ? lv_timer_pause(ui_timer)     : lv_timer_resume(ui_timer));
+  if (blink_timer)  (pause ? lv_timer_pause(blink_timer)  : lv_timer_resume(blink_timer));
+  if (sensor_timer) (pause ? lv_timer_pause(sensor_timer) : lv_timer_resume(sensor_timer));
 }
 
 // --- Navegación de sensores en pantalla única ---
@@ -320,10 +325,12 @@ void setup() {
 
   // Initialize an LVGL input device object (Touchscreen)
   lv_indev_t * indev = lv_indev_create();
-  
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-  // Set the callback function to read Touchscreen input
   lv_indev_set_read_cb(indev, touchscreen_read);
+
+  lv_indev_set_long_press_repeat_time(indev, 0);
+  lv_indev_set_long_press_time(indev, 450);
+  lv_indev_set_scroll_limit(indev, 16);
 
   // Pantalla de inicio y pantalla principal
   lv_create_splash_screen();
@@ -393,9 +400,13 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_text_color(text_label_time_location, lv_palette_main(LV_PALETTE_GREY), 0);
 
   // Timers
-  ui_timer   = lv_timer_create(timer_cb, MEASURE_REFRESH_MS, NULL);
+  ui_timer = lv_timer_create(ui_timer_cb, UI_REFRESH_MS, NULL);
   lv_timer_ready(ui_timer);
+
   blink_timer = lv_timer_create(alert_blink_cb, 500, NULL);
+
+  sensor_timer = lv_timer_create(sensor_timer_cb, LOCAL_READ_MS, NULL);
+  lv_timer_ready(sensor_timer);
 
   update_nav_arrows_pages();
   ensure_auto_rotate_timer();
@@ -436,12 +447,8 @@ void log_print(lv_log_level_t level, const char * buf) {
   Serial.flush();
 }
 
-static void timer_cb(lv_timer_t * timer){
+static void ui_timer_cb(lv_timer_t * timer){
   LV_UNUSED(timer);
-
-  // “Silencio” durante navegación o si no estoy en la pantalla principal
-  const bool quiet = ((int32_t)(nav_quiet_until - millis()) > 0) ||
-                     (lv_screen_active() != main_screen);
 
   if (g_need_page_sync) {
     for (size_t i = 0; i < sensors.size(); ++i) ensure_remote_page(i);
@@ -451,50 +458,31 @@ static void timer_cb(lv_timer_t * timer){
     g_need_page_sync = false;
   }
 
-  if (quiet) {
-    // Sólo tareas livianas (no leer sensores)
-    if (text_label_time_location) {
-      lv_label_set_text(text_label_time_location,
-        (get_formatted_datetime() + " | " + location).c_str());
-    }
-    return;  // <<< salir sin hacer lecturas ni refrescos pesados
-  }
-  // 1) LOCAL
-  read_local_sensors();
+  // Refrescar UI con las variables globales ya actualizadas
   if (local_page.t) {
     if (isnan(local_t)) lv_label_set_text(local_page.t, "--");
     else                lv_label_set_text_fmt(local_page.t, "%.1f%s", local_t, degree_symbol);
   }
-  // Humedad
   if (local_page.h) {
     if (isnan(local_h)) lv_label_set_text(local_page.h, "--");
     else                lv_label_set_text_fmt(local_page.h, "%.1f%%", local_h);
   }
-  // CO
   if (local_page.co) {
     if (isnan(local_co)) lv_label_set_text(local_page.co, "--");
     else                 lv_label_set_text_fmt(local_page.co, "%.0f ppm", local_co);
   }
-  // Icono estado
   if (local_page.icon) set_status_icon(local_page.icon, isnan(local_co) ? 0.0f : local_co);
 
-  // 2) REMOTOS (1:1 con sensors)
-  // Crear páginas faltantes (si se agregaron sensores “en caliente”)
-  for (size_t i = 0; i < sensors.size(); ++i) {
-    ensure_remote_page(i);
-  }
-
+  // Páginas remotas (ESP-NOW) siguen igual
   for (size_t i = 0; i < sensors.size(); ++i) {
     const DiscoveredSensor &s = sensors[i];
     PageWidgets &w = remote_pages[i];
 
-    // Nombre (si cambió)
     if (w.name) {
       const String title = s.name.length()? s.name : s.macStr;
       lv_label_set_text(w.name, title.c_str());
     }
 
-    // Datos (si hay frescos)
     bool fresh = (millis() - s.lastSeen) <= SENSOR_STALE_MS;
     float t = fresh && !isnan(s.last.temp)? s.last.temp : NAN;
     float h = fresh && !isnan(s.last.float_hum)? s.last.float_hum : NAN;
@@ -506,34 +494,10 @@ static void timer_cb(lv_timer_t * timer){
     if (w.icon) set_status_icon(w.icon, isnan(co)? 0.0f : co);
   }
 
-  // Footer hora/lugar
+  // Footer
   if (text_label_time_location) {
     lv_label_set_text(text_label_time_location, (get_formatted_datetime() + " | " + location).c_str());
   }
-
-  // ----- Buzzer/alerta: tomamos el estado de la página visible -----
-  // Si querés que el buzzer reaccione SIEMPRE al LOCAL, usa local_co en vez de leer la visible.
-  // Para leer la visible, calculamos el "offset" de página (0=LOCAL, 1..N=remoto idx+1):
-  // Simplificación: deja el control global como lo tenías pero con 'local_co'.
-  float ppm = isnan(local_co) ? 0.0f : local_co;  // o elegí otro criterio
-
-  if (ppm > 100.0f) {
-      if (!alert_active) buzzer_muted = false;
-      alert_active = true;
-  } else if (ppm > 10.0f) {
-      alert_active = false;
-      alert_blink_state = false;
-      buzzer_muted = false;
-      digitalWrite(BUZZER_PIN, LOW);
-  } else {
-      alert_active = false;
-      alert_blink_state = false;
-      buzzer_muted = false;
-      digitalWrite(BUZZER_PIN, LOW);
-  }
-
-  // Si se agregaron páginas, actualizá flechas
-  update_nav_arrows_pages();
 }
 
 String get_formatted_datetime() {
@@ -1395,28 +1359,26 @@ static void update_nav_arrows_pages() {
   size_t pages_count = 1 + sensors.size();
   bool show = pages_count >= 2;
 
+  // Flecha izquierda
   if (!btn_prev) {
     btn_prev = lv_btn_create(lv_screen_active());
     lv_obj_set_size(btn_prev, 36, 36);
     lv_obj_align(btn_prev, LV_ALIGN_TOP_LEFT, 6, 6);
-    // Flecha izquierda
     lv_obj_add_event_cb(btn_prev, [](lv_event_t *){
       last_user_nav_ms = millis();
-      nav_quiet_until  = millis() + 350;   // 350 ms “libres” para la UI
-      go_to_page(g_curr_page - 1, false);  // sin animación
+      go_to_page(g_curr_page - 1, false);
     }, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl = lv_label_create(btn_prev);
     lv_label_set_text(lbl, LV_SYMBOL_LEFT);
     lv_obj_center(lbl);
   }
+  // Flecha derecha
   if (!btn_next) {
     btn_next = lv_btn_create(lv_screen_active());
     lv_obj_set_size(btn_next, 36, 36);
     lv_obj_align(btn_next, LV_ALIGN_TOP_RIGHT, -6, 6);
-    // Flecha derecha
     lv_obj_add_event_cb(btn_next, [](lv_event_t *){
       last_user_nav_ms = millis();
-      nav_quiet_until  = millis() + 350;
       go_to_page(g_curr_page + 1, false);
     }, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl = lv_label_create(btn_next);
@@ -1507,4 +1469,27 @@ static lv_obj_t * make_back_button(lv_obj_t *parent, lv_align_t align, lv_coord_
   lv_label_set_text(lbl, LV_SYMBOL_LEFT);
   lv_obj_center(lbl);
   return btn;
+}
+
+static void sensor_timer_cb(lv_timer_t * timer) {
+  LV_UNUSED(timer);
+  // Solo leer hardware y actualizar variables globales (local_t, local_h, local_co).
+  read_local_sensors();
+
+  // Si querés, podés actualizar acá el estado de alerta (depende de local_co).
+  float ppm = isnan(local_co) ? 0.0f : local_co;
+  if (ppm > 100.0f) {
+    if (!alert_active) buzzer_muted = false;
+    alert_active = true;
+  } else if (ppm > 10.0f) {
+    alert_active = false;
+    alert_blink_state = false;
+    buzzer_muted = false;
+    digitalWrite(BUZZER_PIN, LOW);
+  } else {
+    alert_active = false;
+    alert_blink_state = false;
+    buzzer_muted = false;
+    digitalWrite(BUZZER_PIN, LOW);
+  }
 }
