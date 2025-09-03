@@ -9,16 +9,20 @@
 #include <esp_now.h>
 #include <DHT.h>
 #include <MQ7.h>
+#include <esp_wifi.h>
 
-// Globals
+// ===== NEW: FreeRTOS ====
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+// =================== TUS GLOBALES ===================
 static lv_display_t *g_disp = nullptr;
 static lv_coord_t SW = 0, SH = 0;
 static int g_curr_page = 0;
 
-// Intervalo de refresco de medidas
-//#define MEASURE_REFRESH_MS 5000
-#define UI_REFRESH_MS        300 
-#define LOCAL_READ_MS        4000   // Sensores locales cada 4 s
+// Intervalos
+#define UI_REFRESH_MS        300
+#define LOCAL_READ_MS        4000
 
 // ====== Paquete idéntico al EMISOR ======
 typedef struct struct_message {
@@ -54,60 +58,53 @@ struct PageWidgets {
   lv_obj_t *co  = nullptr;  // ppm
 };
 
-static PageWidgets local_page;                // página 0 (local)
-static std::vector<PageWidgets> remote_pages; // 1:1 con 'sensors' por índice
+static PageWidgets local_page;
+static std::vector<PageWidgets> remote_pages;
 
 // Pines sensores locales
-#define DHTPIN  22
-#define DHTTYPE DHT22
+#define DHTPIN  22 // Pin DHT11
+#define DHTTYPE DHT11 // Tipo DHT11 o DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
-#define MQ7_PIN 34  // ADC para MQ7 (ajusta si usas otro)
-static float local_t = NAN, local_h = NAN, local_co = NAN; // últimos valores locales
+#define MQ7_PIN 34
+static float local_t = NAN, local_h = NAN, local_co = NAN;
 
 // === Contexto para nombrar sensor ===
-struct NameCtx {
-  lv_obj_t * ta;   // textarea donde se escribe el nombre
-  size_t     idx;  // índice del sensor en 'sensors'
-};
+struct NameCtx { lv_obj_t * ta; size_t idx; };
 static NameCtx g_name_ctx;
 
 static std::vector<DiscoveredSensor> sensors;
-static int selectedSensorIndex = -1;     // índice del sensor activo (en 'sensors'), -1 = ninguno
-static const uint32_t SENSOR_STALE_MS = 30000; // visible en listas si visto en últimos 15s
+static int selectedSensorIndex = -1;
+static const uint32_t SENSOR_STALE_MS = 30000;
 
-// Label para mostrar el nombre del sensor activo
+// Label nombre sensor activo
 static lv_obj_t * text_label_sensor_name = nullptr;
 
 // ====== Estado de recepción ======
 static volatile bool espnow_has_data = false;
 static uint32_t last_rx_ms = 0;
-static const uint32_t ESPNOW_TIMEOUT_MS = 15000; // 15s: si no llegan datos, usamos fallback
+static const uint32_t ESPNOW_TIMEOUT_MS = 15000;
 
-// Vector to store available Wi-Fi SSIDs
+// Wi‑Fi
 std::vector<String> availableSSIDs;
 String wifi_ssid = "";
 String wifi_password = "";
 static const int WIFI_LIST_LIMIT = 10;
 
-// Enter your location
+// Ubicación
 String location = "Bahia Blanca";
 
-// Store date and time
+// Almacenes de texto UI
 String temperature;
 String humidity;
 String monoxide;
 
-// Touchscreen coordinates: (x, y) and pressure (z)
-int x, y;
-
-// Define the pin for the buzzer
+// Buzzer
 #define BUZZER_PIN 15
 static bool buzzer_muted = false;
 
-// SET VARIABLE TO 0 FOR TEMPERATURE IN FAHRENHEIT DEGREES
+// Unidades
 #define TEMP_CELSIUS 1
-
 #if TEMP_CELSIUS
   String temperature_unit = "";
   const char degree_symbol[] = "\u00B0C";
@@ -116,24 +113,23 @@ static bool buzzer_muted = false;
   const char degree_symbol[] = "\u00B0F";
 #endif
 
-// Touchscreen pins
-#define XPT2046_IRQ 27   // T_IRQ
-#define XPT2046_MOSI 13  // T_DIN
-#define XPT2046_MISO 12  // T_OUT
-#define XPT2046_CLK 14   // T_CLK
-#define XPT2046_CS 33    // T_CS
-
+// ==== TOUCH XPT2046 (HSPI) ====
+#define XPT2046_IRQ 27
+#define XPT2046_MOSI 13
+#define XPT2046_MISO 12
+#define XPT2046_CLK 14
+#define XPT2046_CS 33
 SPIClass touchscreenSPI(HSPI);
 XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 
-// Screen dimensions
+// Pantalla
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 480
-
-#define DRAW_BUF_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT / 10 * (LV_COLOR_DEPTH / 8))
+#define LVGL_BUF_LINES 10
+#define DRAW_BUF_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT / LVGL_BUF_LINES * (LV_COLOR_DEPTH / 8))
 uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 
-// Forward declarations
+// ======= PROTOTIPOS (los tuyos) =======
 void get_weather_description(int code);
 void get_weather_data();
 void log_print(lv_log_level_t level, const char * buf);
@@ -141,13 +137,12 @@ void lv_create_main_gui(void);
 String get_formatted_datetime();
 static void alert_blink_cb(lv_timer_t * timer);
 void touchscreen_event_cb(lv_event_t * e);
-void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data);
+void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data); // <- reemplazada
 void lv_create_splash_screen();
 void lv_create_config_menu();
 void scan_and_show_wifi_list(lv_obj_t * parent);
 void show_wifi_keyboard(const char * ssid);
 void connect_to_wifi(String ssid, String password);
-void lv_create_config_menu();
 void lv_create_wifi_menu();
 void scan_and_show_wifi_list(lv_obj_t * parent, int max_items);
 static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int len);
@@ -162,7 +157,6 @@ void kb_name_cancel_cb(lv_event_t * e);
 static void open_sensor_list_screen();
 static void populate_sensor_list();
 static void sensor_scan_timer_cb(lv_timer_t * t);
-static void sensor_back_btn_cb(lv_event_t * e);
 static lv_obj_t * build_wifi_style_keyboard(lv_obj_t * parent, lv_obj_t * textarea);
 static lv_obj_t * create_page(lv_obj_t *parent);
 static void build_common_widgets(lv_obj_t *page, PageWidgets &w, const char *title);
@@ -176,6 +170,10 @@ static void go_to_page(int idx, bool anim=false);
 static lv_obj_t * make_back_button(lv_obj_t *parent, lv_align_t align, lv_coord_t offx, lv_coord_t offy, lv_event_cb_t cb);
 static void ui_timer_cb(lv_timer_t * timer);
 static void sensor_timer_cb(lv_timer_t * timer);
+static bool rtc_has_valid_time();
+static bool wait_time_sync(uint32_t timeout_ms);
+static bool sync_time_via_wifi(const String& ssid, const String& pass);
+static void ensure_sta_for_scan();
 
 static void refresh_ui_now();
 static void set_selected_sensor(int idx);
@@ -183,18 +181,26 @@ static void select_next_sensor();
 static void select_prev_sensor();
 static void auto_rotate_cb(lv_timer_t *t);
 static void ensure_auto_rotate_timer();
+static void create_alert_bars();
+static inline void hide_alert_bars();
+static inline void show_alert_bars();
+static void cb_back_to_main(lv_event_t * e);
+static void cb_back_to_settings(lv_event_t * e);
+static void cb_sensor_back(lv_event_t * e);
+static void espnow_start();
+static void espnow_stop();
 
 static lv_obj_t * text_label_temperature;
 static lv_obj_t * text_label_humidity;
 static lv_obj_t * text_label_time_location;
 static lv_obj_t * text_label_ppm;
-static lv_obj_t * image_status_icon;  // Ícono dinámico: cleanair o alert
-static lv_obj_t * splash_screen;  // pantalla temporal
+static lv_obj_t * image_status_icon;
+static lv_obj_t * splash_screen;
 static lv_obj_t * main_screen;
 static lv_obj_t * config_screen;
 static lv_timer_t * splash_timer;
 static lv_obj_t * kb;
-static lv_obj_t * ta;  // Text area para contraseña
+static lv_obj_t * ta;
 static String selected_ssid = "";
 static lv_style_t style_btn_close;
 static lv_style_t style_btn_ok;
@@ -202,6 +208,11 @@ static bool alert_blink_state = false;
 static bool alert_active = false;
 static lv_obj_t * local_page_root = nullptr;
 static volatile bool g_need_page_sync = false;
+static lv_obj_t *alert_overlay = nullptr;
+static float last_local_t = NAN, last_local_h = NAN, last_local_co = NAN;
+static lv_obj_t *alert_top = nullptr, *alert_bottom = nullptr, *alert_left = nullptr, *alert_right = nullptr;
+#define ALERT_THICKNESS  6   // <- grosor del marco (ajustable)
+static bool espnow_running = false;
 
 static uint32_t nav_quiet_until = 0;
 static lv_timer_t * ui_timer = nullptr;
@@ -213,135 +224,146 @@ static inline void pause_main_timers(bool pause) {
   if (sensor_timer) (pause ? lv_timer_pause(sensor_timer) : lv_timer_resume(sensor_timer));
 }
 
-// --- Navegación de sensores en pantalla única ---
+// === Protecciones de concurrencia y estado ===
+static portMUX_TYPE sensors_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool in_settings = false;
+
+// Soltar toque forzado (evita toques “fantasma” al cambiar de pantalla)
+static inline void force_release_touch();
+
+// Navegación
 static lv_obj_t *btn_prev = nullptr;
 static lv_obj_t *btn_next = nullptr;
-static uint32_t last_user_nav_ms = 0;     // pausa autorrotación tras interacción
-#define AUTO_ROTATE_MS 0                  // 0 = off. Ej: 6000 para rotar cada 6s
-
+static uint32_t last_user_nav_ms = 0;
+#define AUTO_ROTATE_MS 0
 static lv_timer_t *auto_rotate_timer = nullptr;
 
-// ====== Teclado: Shift (↑) mayúsculas/minúsculas ======
-static bool kb_caps = true;  // true: mayúsculas, false: minúsculas
-
-// Mapa MAYÚSCULAS (Shift reemplaza al Enter debajo de Backspace)
+// Teclado Wi‑Fi
+static bool kb_caps = true;
 static const char * KB_MAP_UPPER[] = {
   "1","2","3","4","5","6","7","8","9","0","\n",
   "Q","W","E","R","T","Y","U","I","O","P", LV_SYMBOL_BACKSPACE, "\n",
-  "A","S","D","F","G","H","J","K","L",     LV_SYMBOL_UP,        "\n", // <<-- Shift aquí
+  "A","S","D","F","G","H","J","K","L",     LV_SYMBOL_UP,        "\n",
   "Z","X","C","V","B","N","M",",",".","!","?","\n",
   LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
 };
-
-// Mapa MINÚSCULAS
 static const char * KB_MAP_LOWER[] = {
   "1","2","3","4","5","6","7","8","9","0","\n",
   "q","w","e","r","t","y","u","i","o","p", LV_SYMBOL_BACKSPACE, "\n",
-  "a","s","d","f","g","h","j","k","l",     LV_SYMBOL_UP,        "\n", // <<-- Shift aquí
+  "a","s","d","f","g","h","j","k","l",     LV_SYMBOL_UP,        "\n",
   "z","x","c","v","b","n","m",",",".","!","?","\n",
   LV_SYMBOL_CLOSE, " ", LV_SYMBOL_OK, NULL
 };
-
-// Controles/ancho de las teclas (igual que usabas, con Shift ocupando el ancho del viejo Enter)
 static const lv_buttonmatrix_ctrl_t KB_CTRL_MAP[] = {
-  // Fila 1: 1–0 (10)
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-
-  // Fila 2: Q–P (10) + Backspace (1)
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-  LV_BUTTONMATRIX_CTRL_WIDTH_2,   // backspace más ancho
-
-  // Fila 3: A–L (9) + Shift (1)
+  LV_BUTTONMATRIX_CTRL_WIDTH_2,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1,
-  LV_BUTTONMATRIX_CTRL_WIDTH_2,   // Shift ancho (ocupa el lugar del Enter)
-
-  // Fila 4: Z–? (11)
+  LV_BUTTONMATRIX_CTRL_WIDTH_2,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
   LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-
-  // Fila 5: Close, Space, OK (3)
-  LV_BUTTONMATRIX_CTRL_WIDTH_3,   // Close
-  LV_BUTTONMATRIX_CTRL_WIDTH_6,   // Space
-  LV_BUTTONMATRIX_CTRL_WIDTH_3,   // OK
+  LV_BUTTONMATRIX_CTRL_WIDTH_3,
+  LV_BUTTONMATRIX_CTRL_WIDTH_6,
+  LV_BUTTONMATRIX_CTRL_WIDTH_3,
 };
 
+// =====================================================
+// ========= NUEVO: Infraestructura táctil RTOS ========
+// =====================================================
+struct TouchSample { int16_t x, y; bool pressed; uint32_t ts; };
+//static volatile TouchSample g_touch_last = {0,0,false,0};
+static TouchSample g_touch_last = {0,0,false,0};
+static portMUX_TYPE g_touch_mux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t g_touch_task = nullptr;
+
+static void touch_task(void *);
+
+static const int   TS_SAMPLES      = 4;    // 3–5
+static const int   TS_MAX_JITTER   = 15;   // px
+static const int   TS_RELEASE_HOLD = 30;   // ms
+
+static inline int16_t clamp16(int v, int lo, int hi){ if(v<lo) return lo; if(v>hi) return hi; return v; }
+static int median_small(int *v, int n){
+  for(int i=1;i<n;i++){ int k=v[i], j=i-1; while(j>=0 && v[j]>k){ v[j+1]=v[j]; j--; } v[j+1]=k; }
+  return v[n/2];
+}
+
+// =================== SETUP / LOOP ===================
 void setup() {
   String LVGL_Arduino = String("LVGL Library Version: ") + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
   Serial.begin(115200);
   Serial.println(LVGL_Arduino);
 
   dht.begin();
-  analogReadResolution(12); // ESP32 ADC 0..4095
+  analogReadResolution(12);
 
-  // --- ESP-NOW ---
-  WiFi.mode(WIFI_STA);
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error inicializando ESP-NOW");
-  } else {
-    esp_now_register_recv_cb(on_espnow_recv);
-    Serial.printf("ESP-NOW listo. Canal actual: %d\n", wifi_channel());
+  // --- RTC: si querés, podés mostrar si ya hay hora válida antes de NTP
+  setenv("TZ", "America/Argentina/Buenos_Aires", 1);
+  tzset();
+  if (rtc_has_valid_time()) {
+    Serial.println("[TIME] RTC ya tiene hora válida al arrancar.");
   }
 
-  // Initialize Buzzer
+  espnow_start();
+  Serial.printf("ESP-NOW listo. Canal actual: %d\n", wifi_channel());
+
+  // Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);  // buzzer apagado al inicio
+  digitalWrite(BUZZER_PIN, LOW);
 
-  // Connect to Wi-Fi
-  Serial.println("Esperando conexión WiFi desde menú.");
-
-  configTzTime("GMT+3", "pool.ntp.org", "time.nist.gov");
-
-  // Start LVGL
+  // LVGL + TFT
   lv_init();
-  // Register print function for debugging
   lv_log_register_print_cb(log_print);
 
   pinMode(XPT2046_CS, OUTPUT);
   digitalWrite(XPT2046_CS, HIGH);
   pinMode(XPT2046_IRQ, INPUT_PULLUP);
 
-  // Start the SPI for the touchscreen and init the touchscreen
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   touchscreen.begin(touchscreenSPI);
   touchscreen.setRotation(2);
 
-  // Create a display object
   lv_display_t * disp;
-  // Initialize the TFT display using the TFT_eSPI library
   disp = lv_tft_espi_create(SCREEN_WIDTH, SCREEN_HEIGHT, draw_buf, sizeof(draw_buf));
   lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
 
-  g_disp = lv_display_get_default();       // o g_disp = disp;
+  g_disp = lv_display_get_default();
   SW = lv_display_get_horizontal_resolution(g_disp);
   SH = lv_display_get_vertical_resolution(g_disp);
   Serial.printf("RES after rotation: %d x %d\n", (int)SW, (int)SH);
 
-  // Initialize an LVGL input device object (Touchscreen)
+  // InDev táctil (usa read_cb ligero)
   lv_indev_t * indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, touchscreen_read);
-
   lv_indev_set_long_press_repeat_time(indev, 0);
   lv_indev_set_long_press_time(indev, 450);
   lv_indev_set_scroll_limit(indev, 16);
 
-  // Pantalla de inicio y pantalla principal
+  // ===== NEW: lanzar task táctil en CORE 0 =====
+  xTaskCreatePinnedToCore(
+    touch_task, "touch_task",
+    4096, nullptr,
+    12,               // prioridad alta (no máxima)
+    &g_touch_task,
+    0                 // 0 -> core 0 (GUI/loop suele ir en core 1)
+  );
+
+  // UI
   lv_create_splash_screen();
-  //main_screen = lv_screen_active();
 }
 
 void loop() {
-  //lv_task_handler();  // let the GUI do its work
-  lv_timer_handler();
-  lv_tick_inc(5);     // tell LVGL how much time has passed
-  delay(5);           // let this time pass
+  lv_timer_handler();  // procesa LVGL
+  delay(5);            // duerme ~5 ms reales
+  lv_tick_inc(5);      // informa 5 ms a LVGL
 }
 
 void lv_create_main_gui(void) {
@@ -355,14 +377,30 @@ void lv_create_main_gui(void) {
   // ROOT horizontal de páginas
   pages = lv_obj_create(lv_screen_active());
   lv_obj_set_style_anim_time(pages, 0, 0);
-  lv_obj_set_size(pages, SW, SH);                 // <-- usar resolución real
+  lv_obj_set_size(pages, SW, SH);
   lv_obj_align(pages, LV_ALIGN_CENTER, 0, 0);
   lv_obj_set_scroll_dir(pages, LV_DIR_HOR);
-  lv_obj_set_scroll_snap_x(pages, LV_SCROLL_SNAP_START);  // START evita “cortes”
+  lv_obj_set_scroll_snap_x(pages, LV_SCROLL_SNAP_START);
   lv_obj_set_style_pad_all(pages, 0, 0);
   lv_obj_set_style_pad_row(pages, 0, 0);
   lv_obj_set_style_pad_column(pages, 0, 0);
   lv_obj_set_flex_flow(pages, LV_FLEX_FLOW_ROW);
+/*
+  if (!alert_overlay) {
+  alert_overlay = lv_obj_create(lv_screen_active());
+  lv_obj_set_size(alert_overlay, SW, SH);
+  lv_obj_align(alert_overlay, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_bg_opa(alert_overlay, LV_OPA_TRANSP, 0);   // sin fondo
+  lv_obj_set_style_border_width(alert_overlay, 4, 0);
+  lv_obj_set_style_border_color(alert_overlay, lv_palette_main(LV_PALETTE_RED), 0);
+  lv_obj_set_style_shadow_width(alert_overlay, 0, 0);
+  //lv_obj_add_flag(alert_overlay, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(alert_overlay, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_flag(alert_overlay, LV_OBJ_FLAG_HIDDEN);          // empieza oculto
+  lv_obj_move_foreground(alert_overlay);
+}
+*/
+  if (!alert_top) create_alert_bars();
 
   lv_obj_set_scrollbar_mode(pages, LV_SCROLLBAR_MODE_OFF);
   lv_obj_clear_flag(pages, LV_OBJ_FLAG_SCROLL_ELASTIC);
@@ -389,7 +427,7 @@ void lv_create_main_gui(void) {
   lv_obj_move_foreground(btn_settings);
   lv_obj_add_event_cb(btn_settings, [](lv_event_t * e) {
     lv_create_config_menu();
-  }, LV_EVENT_CLICKED, NULL);
+  }, LV_EVENT_PRESSED, NULL);
 
   // Fecha/hora (tu footer actual)
   text_label_time_location = lv_label_create(lv_screen_active());
@@ -451,52 +489,67 @@ static void ui_timer_cb(lv_timer_t * timer){
   LV_UNUSED(timer);
 
   if (g_need_page_sync) {
-    for (size_t i = 0; i < sensors.size(); ++i) ensure_remote_page(i);
+    // asegurar páginas remotas existentes
+    size_t n;
+    portENTER_CRITICAL(&sensors_mux);
+    n = sensors.size();
+    portEXIT_CRITICAL(&sensors_mux);
+
+    for (size_t i = 0; i < n; ++i) ensure_remote_page(i);
     update_nav_arrows_pages();
-    lv_obj_update_layout(pages);
-    go_to_page(g_curr_page, /*anim=*/false);
+    go_to_page(g_curr_page, false);
     g_need_page_sync = false;
   }
 
-  // Refrescar UI con las variables globales ya actualizadas
-  if (local_page.t) {
+  // Local (cache de cambios)
+  if (local_t != last_local_t && local_page.t) {
     if (isnan(local_t)) lv_label_set_text(local_page.t, "--");
     else                lv_label_set_text_fmt(local_page.t, "%.1f%s", local_t, degree_symbol);
+    last_local_t = local_t;
   }
-  if (local_page.h) {
+  if (local_h != last_local_h && local_page.h) {
     if (isnan(local_h)) lv_label_set_text(local_page.h, "--");
     else                lv_label_set_text_fmt(local_page.h, "%.1f%%", local_h);
+    last_local_h = local_h;
   }
-  if (local_page.co) {
+  if (local_co != last_local_co && local_page.co) {
     if (isnan(local_co)) lv_label_set_text(local_page.co, "--");
     else                 lv_label_set_text_fmt(local_page.co, "%.0f ppm", local_co);
+    last_local_co = local_co;
   }
   if (local_page.icon) set_status_icon(local_page.icon, isnan(local_co) ? 0.0f : local_co);
 
-  // Páginas remotas (ESP-NOW) siguen igual
-  for (size_t i = 0; i < sensors.size(); ++i) {
-    const DiscoveredSensor &s = sensors[i];
+  // Remotos (copiar snapshot para iterar fuera del lock largo)
+  std::vector<DiscoveredSensor> snap;
+  portENTER_CRITICAL(&sensors_mux);
+  snap = sensors; // copia liviana (String hace copy-on-write en Arduino)
+  portEXIT_CRITICAL(&sensors_mux);
+
+  for (size_t i = 0; i < snap.size(); ++i) {
+    const auto &s = snap[i];
     PageWidgets &w = remote_pages[i];
+    bool fresh = (millis() - s.lastSeen) <= SENSOR_STALE_MS;
 
     if (w.name) {
       const String title = s.name.length()? s.name : s.macStr;
       lv_label_set_text(w.name, title.c_str());
     }
 
-    bool fresh = (millis() - s.lastSeen) <= SENSOR_STALE_MS;
-    float t = fresh && !isnan(s.last.temp)? s.last.temp : NAN;
-    float h = fresh && !isnan(s.last.float_hum)? s.last.float_hum : NAN;
-    float co = fresh && !isnan(s.last.mono)? s.last.mono : NAN;
+    float t  = (fresh && !isnan(s.last.temp))       ? s.last.temp      : NAN;
+    float h  = (fresh && !isnan(s.last.float_hum))  ? s.last.float_hum : NAN;
+    float co = (fresh && !isnan(s.last.mono))       ? s.last.mono      : NAN;
 
-    if (w.t)  { if (isnan(t)) lv_label_set_text(w.t, "--"); else lv_label_set_text_fmt(w.t, "%.1f%s", t, degree_symbol); }
-    if (w.h)  { if (isnan(h)) lv_label_set_text(w.h, "--"); else lv_label_set_text_fmt(w.h, "%.1f%%", h); }
+    if (w.t)  { if (isnan(t))  lv_label_set_text(w.t,  "--"); else lv_label_set_text_fmt(w.t,  "%.1f%s", t,  degree_symbol); }
+    if (w.h)  { if (isnan(h))  lv_label_set_text(w.h,  "--"); else lv_label_set_text_fmt(w.h,  "%.1f%%",  h); }
     if (w.co) { if (isnan(co)) lv_label_set_text(w.co, "--"); else lv_label_set_text_fmt(w.co, "%.0f ppm", co); }
     if (w.icon) set_status_icon(w.icon, isnan(co)? 0.0f : co);
   }
 
-  // Footer
-  if (text_label_time_location) {
+  // Footer cada ~1s
+  static uint32_t last_time_ms = 0;
+  if (text_label_time_location && (lv_tick_get() - last_time_ms) > 1000) {
     lv_label_set_text(text_label_time_location, (get_formatted_datetime() + " | " + location).c_str());
+    last_time_ms = lv_tick_get();
   }
 }
 
@@ -513,116 +566,19 @@ String get_formatted_datetime() {
 
 static void alert_blink_cb(lv_timer_t * timer) {
   LV_UNUSED(timer);
+  if (!alert_top) return;
 
   if (!alert_active) {
-    digitalWrite(BUZZER_PIN, LOW);
-    // Apagar borde si quedó encendido
-    if (pages) {
-      lv_obj_set_style_border_width(pages, 0, 0);
-      lv_obj_set_style_shadow_width(pages, 0, 0);
-    }
-    return;
-  }
-
-  // Si no existe pages aún, no hacemos nada visual
-  if (!pages) {
-    if (!buzzer_muted) digitalWrite(BUZZER_PIN, HIGH);
+    if (!buzzer_muted) digitalWrite(BUZZER_PIN, LOW);
+    hide_alert_bars();
     return;
   }
 
   alert_blink_state = !alert_blink_state;
+  if (alert_blink_state) show_alert_bars(); else hide_alert_bars();
 
-  lv_color_t color = alert_blink_state ? lv_palette_main(LV_PALETTE_RED) : lv_color_black();
-  lv_obj_set_style_border_width(pages, 4, 0);
-  lv_obj_set_style_border_color(pages, color, 0);
-  lv_obj_set_style_shadow_width(pages, 0, 0);
-
-  if (!buzzer_muted) {
-    digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
-  } else {
-    digitalWrite(BUZZER_PIN, LOW);
-  }
-}
-
-// Get the Touchscreen data
-void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
-  static bool    s_pressed_last = false;
-  static uint32_t s_last_touch_ms = 0;
-  static int16_t s_last_x = 0, s_last_y = 0;
-
-  // Si el IRQ no dice “tocado”, igual mantenemos el estado un instante (debounce release)
-  const uint32_t now = millis();
-  bool raw_pressed = (touchscreen.tirqTouched() || touchscreen.touched());
-
-  // Recolectar N muestras rápidas si “parece” que hay toque
-  const int N = raw_pressed ? 4 : 0;
-  int xs[N], ys[N];
-  int n_ok = 0;
-
-  for (int i = 0; i < N; ++i) {
-    TS_Point p = touchscreen.getPoint();
-
-    // --- Calibración tuya ---
-    float alpha_x = 0.001f, beta_x = -0.130f, delta_x = 498.426f;
-    float alpha_y = -0.087f, beta_y = 0.001f,  delta_y = 339.434f;
-    int x = (int)(alpha_y * p.x + beta_y * p.y + delta_y);
-    int y = (int)(alpha_x * p.x + beta_x * p.y + delta_x);
-    if (x < 0) x = 0; if (x > SCREEN_WIDTH  - 1) x = SCREEN_WIDTH  - 1;
-    if (y < 0) y = 0; if (y > SCREEN_HEIGHT - 1) y = SCREEN_HEIGHT - 1;
-
-    xs[n_ok] = x;
-    ys[n_ok] = y;
-    n_ok++;
-
-    // micro‑sleep cortita para no bloquear LVGL pero permitir variación mínima
-    delayMicroseconds(200);
-  }
-
-  auto median3 = [](int *v, int n) -> int {
-    // n es 3 o 4; tomamos mediana “simple”
-    if (n <= 0) return 0;
-    // insertion sort chico
-    for (int i=1;i<n;i++){int k=v[i],j=i-1;while(j>=0 && v[j]>k){v[j+1]=v[j];j--;}v[j+1]=k;}
-    return v[n/2];
-  };
-
-  bool pressed = false;
-  int rx=0, ry=0;
-
-  if (n_ok >= 3) {
-    rx = median3(xs, n_ok);
-    ry = median3(ys, n_ok);
-    // “Consistencia”: si la dispersión es muy alta, lo tomamos como no‑toque
-    int dx = xs[n_ok-1] - xs[0];
-    int dy = ys[n_ok-1] - ys[0];
-    if (abs(dx) < 15 && abs(dy) < 15) pressed = true; // ajustá 15–25 px si hiciera falta
-  }
-
-  // Debounce de release: mantener PRESSED ~30 ms tras “soltar”
-  const uint32_t RELEASE_HOLD_MS = 30;
-  if (!pressed && s_pressed_last && (now - s_last_touch_ms) <= RELEASE_HOLD_MS) {
-    pressed = true;
-    rx = s_last_x; ry = s_last_y;
-  }
-
-  // Actualizar estados
-  if (pressed) {
-    s_last_touch_ms = now;
-    s_last_x = rx; s_last_y = ry;
-    data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = rx;
-    data->point.y = ry;
-
-    // Silenciar buzzer si hay alerta activa
-    if (alert_active) { buzzer_muted = true; digitalWrite(BUZZER_PIN, LOW); }
-  } else {
-    data->state = LV_INDEV_STATE_RELEASED;
-    // Último punto se puede dejar (LVGL lo ignora en RELEASE)
-    data->point.x = s_last_x;
-    data->point.y = s_last_y;
-  }
-
-  s_pressed_last = pressed;
+  if (!buzzer_muted) digitalWrite(BUZZER_PIN, alert_blink_state ? HIGH : LOW);
+  else               digitalWrite(BUZZER_PIN, LOW);
 }
 
 void lv_create_splash_screen() {
@@ -647,7 +603,7 @@ void lv_create_splash_screen() {
 void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
   availableSSIDs.clear();
 
-  int n = WiFi.scanNetworks();  // sincrónico
+  int n = WiFi.scanComplete(); // resultados cacheados del último scan async
   if (n <= 0) {
     lv_obj_t * label = lv_label_create(parent);
     lv_label_set_text(label, "No se encontraron redes WiFi.");
@@ -655,48 +611,55 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
     return;
   }
 
-  // Estilo para texto más grande
-  static lv_style_t style_wifi_text;
-  static bool style_wifi_text_inited = false;
-  if(!style_wifi_text_inited) {
-      style_wifi_text_inited = true;
-      lv_style_init(&style_wifi_text);
-      lv_style_set_text_font(&style_wifi_text, &lv_font_montserrat_18); // ajusta el tamaño aquí
+  if (n == 0) {
+  lv_obj_t * label = lv_label_create(parent);
+  lv_label_set_text(label, "No se encontraron redes WiFi.");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 0);
+  return;
   }
 
-  int count = min(n, max_items);
-  for (int i = 0; i < count; ++i) {
+  static lv_style_t style_wifi_text;
+  static bool style_wifi_text_inited = false;
+  if (!style_wifi_text_inited) {
+    style_wifi_text_inited = true;
+    lv_style_init(&style_wifi_text);
+    lv_style_set_text_font(&style_wifi_text, &lv_font_montserrat_18);
+  }
+
+  int shown = 0;
+  for (int i = 0; i < n && shown < max_items; ++i) {
     String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) continue;     // ignora ocultas/vacías si no querés listarlas
+
     availableSSIDs.push_back(ssid);
 
-    // Botón por red
     lv_obj_t * btn = lv_btn_create(parent);
     lv_obj_set_width(btn, lv_pct(70));
-    lv_obj_set_height(btn, 30);
-    //lv_obj_center(btn);
+    lv_obj_set_height(btn, 32);
 
     lv_obj_t * label = lv_label_create(btn);
     lv_label_set_text(label, ssid.c_str());
     lv_obj_center(label);
-    lv_obj_add_style(label, &style_wifi_text, 0); // aplicar estilo de fuente
+    lv_obj_add_style(label, &style_wifi_text, 0);
 
-    lv_obj_update_layout(parent);          // recalcula layout
-    lv_obj_scroll_to_y(parent, 0, LV_ANIM_OFF);  // fuerza scroll al tope
-
-    // Evento: al tocar, abrir teclado de contraseña
     lv_obj_add_event_cb(btn, [](lv_event_t * e) {
       lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
       lv_obj_t * label = lv_obj_get_child(btn, 0);
       const char * ssid_selected = lv_label_get_text(label);
       show_wifi_keyboard(ssid_selected);
     }, LV_EVENT_CLICKED, NULL);
+
+    shown++;
   }
-  
+
+  // deja los resultados cacheados por si volvés a esta pantalla sin re-escanear
   lv_obj_scroll_to_y(parent, 0, LV_ANIM_OFF);
 }
 
 void show_wifi_keyboard(const char * ssid) {
   pause_main_timers(true);
+
+  lv_indev_reset(NULL, NULL);
 
   selected_ssid = String(ssid);
   lv_obj_clean(lv_screen_active());
@@ -731,45 +694,44 @@ void show_wifi_keyboard(const char * ssid) {
 }
 
 void connect_to_wifi(String ssid, String password) {
-  WiFi.disconnect();
-  WiFi.begin(ssid.c_str(), password.c_str());
-
   lv_obj_clean(lv_screen_active());
 
   lv_obj_t * label = lv_label_create(lv_screen_active());
-  lv_label_set_text(label, "Conectando...");
+  lv_label_set_text(label, "Sincronizando hora...");
   lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
-  int retries = 0;
-  while (WiFi.status() != WL_CONNECTED && retries < 20) {
-    delay(500);
-    retries++;
+  // Hacemos la sync (bloqueante pero corta)
+  bool ok = sync_time_via_wifi(ssid, password);
+
+  if (ok) {
+    lv_label_set_text(label, "Hora actualizada ✓");
+  } else {
+    lv_label_set_text(label, "No se pudo actualizar la hora");
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("Conectado a WiFi");
-    lv_label_set_text(label, "¡Conectado!");
-    delay(2000);
-    lv_scr_load(main_screen);  // Volver a la pantalla principal
-    pause_main_timers(false);
-  } else {
-    Serial.println("Error al conectar");
-    lv_label_set_text(label, "Error al conectar");
-    delay(2000);
-    lv_obj_clean(lv_screen_active());
-    lv_create_config_menu();  // Volver al menú de configuración
-  }
+  // Pequeña pausa visual
+  delay(1200);
+
+  // Volver a la pantalla principal y reanudar timers/alertas
+  lv_scr_load(main_screen);
+  lv_indev_reset(NULL, NULL);
+  pause_main_timers(false);
+  if (alert_active) show_alert_bars(); else hide_alert_bars();
 }
 
 void lv_create_config_menu() {
   pause_main_timers(true);
+  hide_alert_bars();
+
+  in_settings = true;
+  force_release_touch();
 
   static lv_style_t style_btn_text;
   static bool style_btn_text_inited = false;
   if(!style_btn_text_inited) {
-      style_btn_text_inited = true;
-      lv_style_init(&style_btn_text);
-      lv_style_set_text_font(&style_btn_text, &lv_font_montserrat_28); // fuente más grande
+    style_btn_text_inited = true;
+    lv_style_init(&style_btn_text);
+    lv_style_set_text_font(&style_btn_text, &lv_font_montserrat_28);
   }
 
   // Crear pantalla de configuración
@@ -782,13 +744,10 @@ void lv_create_config_menu() {
   lv_label_set_text(title, "Menu de configuracion");
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
-  // Botón Volver
-  make_back_button(config_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, [](lv_event_t * e){
-  lv_scr_load(main_screen);
-  pause_main_timers(false);
-  });
+  // Botón Volver (sale a principal)
+  make_back_button(config_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, cb_back_to_main);
 
-  // Contenedor para opciones (columna)
+  // Contenedor para opciones
   lv_obj_t * list = lv_obj_create(config_screen);
   lv_obj_set_size(list, lv_pct(90), lv_pct(65));
   lv_obj_align(list, LV_ALIGN_CENTER, 0, 10);
@@ -797,7 +756,6 @@ void lv_create_config_menu() {
   lv_obj_set_style_pad_all(list, 10, 0);
   lv_obj_set_scroll_dir(list, LV_DIR_VER);
   lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
-  // Quitar borde, sombra y contorno
   lv_obj_set_style_border_width(list, 0, 0);
   lv_obj_set_style_shadow_width(list, 0, 0);
   lv_obj_set_style_outline_width(list, 0, 0);
@@ -809,48 +767,52 @@ void lv_create_config_menu() {
   lv_obj_t * lbl_wifi = lv_label_create(btn_wifi);
   lv_label_set_text(lbl_wifi, "WiFi");
   lv_obj_center(lbl_wifi);
-  lv_obj_add_style(lbl_wifi, &style_btn_text, 0); // aplicar estilo de fuente
+  lv_obj_add_style(lbl_wifi, &style_btn_text, 0);
   lv_obj_add_event_cb(btn_wifi, [](lv_event_t * e) {
-    lv_create_wifi_menu();
+    LV_UNUSED(e);
+    lv_create_wifi_menu(); // seguimos en settings
   }, LV_EVENT_CLICKED, NULL);
 
-  // Botón Agregar Sensor (placeholder)
+  // Botón Agregar Sensor
   lv_obj_t * btn_sensor = lv_btn_create(list);
   lv_obj_set_width(btn_sensor, lv_pct(100));
   lv_obj_set_height(btn_sensor, 50);
   lv_obj_t * lbl_sensor = lv_label_create(btn_sensor);
   lv_label_set_text(lbl_sensor, "Agregar sensor");
   lv_obj_center(lbl_sensor);
-  lv_obj_add_style(lbl_sensor, &style_btn_text, 0); // aplicar estilo de fuente
+  lv_obj_add_style(lbl_sensor, &style_btn_text, 0);
   lv_obj_add_event_cb(btn_sensor, [](lv_event_t * e) {
-  open_sensor_list_screen();
+    LV_UNUSED(e);
+    open_sensor_list_screen(); // seguimos en settings
   }, LV_EVENT_CLICKED, NULL);
 }
 
 void lv_create_wifi_menu() {
   pause_main_timers(true);
+  hide_alert_bars();
+
+  in_settings = true;
+  force_release_touch();
+
+  // ► Pausar ESP-NOW para que el escaneo sea fiable
+  espnow_stop();
+
+  // ► Preparar STA para escanear (NO apagarla)
+  ensure_sta_for_scan();
 
   lv_obj_t * wifi_screen = lv_obj_create(NULL);
   lv_obj_set_size(wifi_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
   lv_scr_load(wifi_screen);
 
-  // Título
-  lv_obj_t * title = lv_label_create(wifi_screen);
-  lv_label_set_text(title, "Redes WiFi");
-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
-
-  // Botón Volver
-  make_back_button(wifi_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, [](lv_event_t * e){
-  lv_create_config_menu();
-  });
-
-  // Contenedor scrollable para la lista
   lv_obj_t * list = lv_obj_create(wifi_screen);
   lv_obj_set_size(list, lv_pct(90), lv_pct(70));
   lv_obj_align(list, LV_ALIGN_CENTER, 0, 10);
   lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
 
+  // Botón Volver → vuelve a Settings y REANUDA ESP-NOW allí
+  make_back_button(wifi_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, cb_back_to_settings);
 
+  // Contenedor scrollable para la lista
   lv_obj_set_style_pad_row(list, 8, 0);
   lv_obj_set_style_pad_all(list, 8, 0);
   // Scroll solo vertical y sin “snap”
@@ -869,42 +831,82 @@ void lv_create_wifi_menu() {
     LV_FLEX_ALIGN_CENTER   // alineación de contenido (última línea)
   );
 
-  // Etiqueta "Escaneando..."
   lv_obj_t * scanning = lv_label_create(list);
   lv_label_set_text(scanning, "Escaneando...");
   lv_obj_center(scanning);
 
-  // Hacemos el escaneo (sincrónico) y mostramos máx. 10
-  // (si querés, podés cambiar a WiFi.scanNetworks(true) y esperar, pero así es simple)
+  // --- Escaneo asíncrono real (con parámetros explícitos) ---
+  WiFi.scanDelete();
+  // async=true, show_hidden=false, passive=true, max_ms_per_chan=180
+  WiFi.scanNetworks(true, /*show_hidden*/false, /*passive*/true, /*max_ms_per_chan*/180);
+
+  // Timer que espera el fin del scan sin bloquear (con 1 reintento si falla)
   lv_timer_t * t = lv_timer_create_basic();
-  lv_timer_set_period(t, 10);
-  lv_timer_set_repeat_count(t, 1);
+  lv_timer_set_period(t, 180);
+  lv_timer_set_repeat_count(t, -1);
   lv_timer_set_user_data(t, list);
   lv_timer_set_cb(t, [](lv_timer_t * t) {
     lv_obj_t * parent_list = (lv_obj_t *)lv_timer_get_user_data(t);
-    lv_obj_clean(parent_list); // limpiar "Escaneando..."
+    static bool retried = false;
+
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return;
+
+    lv_obj_clean(parent_list);
+
+    if (n == WIFI_SCAN_FAILED) {
+      // Primer intento falló → hacemos un "soft restart" y reintentamos una vez
+      if (!retried) {
+        retried = true;
+        WiFi.scanDelete();
+        // “Soft restart” del driver
+        esp_wifi_stop(); esp_wifi_start(); delay(50);
+        // Reintento con mismos parámetros
+        WiFi.scanNetworks(true, false, true, 200);
+        // Mostramos “reintentando...”
+        lv_obj_t * lbl = lv_label_create(parent_list);
+        lv_label_set_text(lbl, "Reintentando escaneo...");
+        lv_obj_center(lbl);
+        return;
+      }
+      // Falló incluso tras retry
+      lv_obj_t * lbl = lv_label_create(parent_list);
+      lv_label_set_text(lbl, "Error de escaneo.\nReintentá o acercate al router.");
+      lv_obj_center(lbl);
+      lv_timer_del(t);
+      return;
+    }
+
+    // OK o 0 redes: mostramos (0 → “No se encontraron redes”)
     scan_and_show_wifi_list(parent_list, WIFI_LIST_LIMIT);
+    lv_timer_del(t);
   });
 }
 
 static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   if (!mac || len != sizeof(struct_message)) return;
-  int idx = touch_or_add_sensor(mac);
 
-  memcpy(&sensors[idx].last, incomingData, sizeof(struct_message));
-  sensors[idx].lastSeen = millis();
+  // Si estamos en settings: NO crear sensores nuevos (evita realocaciones del vector)
+  if (in_settings) {
+    int idx = find_sensor_index_by_mac(mac);
+    if (idx < 0) return; // ignorá altas nuevas
+    portENTER_CRITICAL(&sensors_mux);
+    memcpy(&sensors[idx].last, incomingData, sizeof(struct_message));
+    sensors[idx].lastSeen = millis();
+    portEXIT_CRITICAL(&sensors_mux);
+  } else {
+    portENTER_CRITICAL(&sensors_mux);
+    int idx = touch_or_add_sensor(mac);  // puede push_back
+    memcpy(&sensors[idx].last, incomingData, sizeof(struct_message));
+    sensors[idx].lastSeen = millis();
+    portEXIT_CRITICAL(&sensors_mux);
+  }
 
-  // Asegurá la página remota (si aún no existía)
-  //if (pages) ensure_remote_page(idx);
-  //update_nav_arrows_pages();
+  // Log opcional, ACK, etc. (sin tocar el vector)
+  const struct_message &in = *(const struct_message*)incomingData;
+  Serial.printf("[ESP-NOW] RX %02X:%02X:%02X:%02X:%02X:%02X | S:%c T:%.1f H:%.1f CO:%.1f\n",
+                mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], in.sensor, in.temp, in.float_hum, in.mono);
 
-  // Log útil
-  const struct_message &in = sensors[idx].last;
-  Serial.printf("[ESP-NOW] RX %s | S:%c T:%.1f H:%.1f CO:%.1f (named:'%s')\n",
-                sensors[idx].macStr.c_str(), in.sensor, in.temp, in.float_hum, in.mono,
-                sensors[idx].name.c_str());
-
-  // ACK opcional si el emisor lo pide
   if (in.ackRequired) {
     if (!esp_now_is_peer_exist(mac)) {
       esp_now_peer_info_t peer{};
@@ -922,9 +924,15 @@ static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int 
     ack.isAck = true;
     esp_now_send(mac, (uint8_t*)&ack, sizeof(ack));
   }
-  
-  if (selectedSensorIndex < 0) selectedSensorIndex = idx;
-  g_need_page_sync = true;   // <<-- pedir al hilo UI que sincronice páginas
+
+  if (selectedSensorIndex < 0) {
+    // elegir alguno existente, sin leer el vector dentro del lock
+    portENTER_CRITICAL(&sensors_mux);
+    if (!sensors.empty()) selectedSensorIndex = 0;
+    portEXIT_CRITICAL(&sensors_mux);
+  }
+
+  g_need_page_sync = true;   // pedir a la UI que sincronice páginas
 }
 
 // (opcional) para debugging canal WiFi
@@ -1045,6 +1053,8 @@ void kb_name_cancel_cb(lv_event_t * e) {
 
 // Crea/abre la pantalla con la lista de sensores detectados
 static void open_sensor_list_screen() {
+  hide_alert_bars();
+
   if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
   if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
 
@@ -1052,13 +1062,16 @@ static void open_sensor_list_screen() {
   lv_obj_set_size(sensor_list_screen, SCREEN_WIDTH, SCREEN_HEIGHT);
   lv_scr_load(sensor_list_screen);
 
+  lv_indev_reset(NULL, NULL);
+  force_release_touch();
+
   // Título
   lv_obj_t * title = lv_label_create(sensor_list_screen);
   lv_label_set_text(title, "Sensores disponibles");
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
 
   // Botón Volver
-  make_back_button(sensor_list_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, sensor_back_btn_cb);
+  make_back_button(sensor_list_screen, LV_ALIGN_BOTTOM_LEFT, 10, -10, cb_sensor_back);
  
 
   // Contenedor scrollable (lista)
@@ -1087,38 +1100,66 @@ static void populate_sensor_list() {
 
   lv_obj_clean(sensor_list_container);
 
+  // Snapshot para iterar sin lock largo
+  std::vector<DiscoveredSensor> snap;
+  portENTER_CRITICAL(&sensors_mux);
+  snap = sensors;
+  portEXIT_CRITICAL(&sensors_mux);
+
   int shown = 0;
   uint32_t now = millis();
 
-  for (size_t i = 0; i < sensors.size(); ++i) {
-    if (now - sensors[i].lastSeen > SENSOR_STALE_MS) continue; // muy viejo: no mostrar
+  for (size_t i = 0; i < snap.size(); ++i) {
+    if (now - snap[i].lastSeen > SENSOR_STALE_MS) continue; // muy viejo
 
     lv_obj_t * btn = lv_btn_create(sensor_list_container);
     lv_obj_set_width(btn, lv_pct(100));
     lv_obj_set_height(btn, 40);
 
-    String line = (sensors[i].name.length() ? sensors[i].name : sensors[i].macStr);
+    String line = (snap[i].name.length() ? snap[i].name : snap[i].macStr);
     line += "   ";
-    line += String(sensors[i].last.temp,1) + "°C  ";
-    line += String(sensors[i].last.float_hum,1) + "%  ";
-    line += String(sensors[i].last.mono,0) + "ppm";
+    line += String(snap[i].last.temp,1) + "°C  ";
+    line += String(snap[i].last.float_hum,1) + "%  ";
+    line += String(snap[i].last.mono,0) + "ppm";
 
     lv_obj_t * lbl = lv_label_create(btn);
     lv_label_set_text(lbl, line.c_str());
     lv_obj_center(lbl);
 
-    // Guardar índice como user_data y conectar callback
-    lv_obj_set_user_data(btn, (void*)i);
+    // Guardar índice real del vector principal (buscamos por MAC al click)
     lv_obj_add_event_cb(btn, [](lv_event_t * e) {
-    size_t idx = (size_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
-    open_name_screen(idx); // <-- usa la pantalla con teclado estilo Wi‑Fi
+      // leemos el texto (o podrías guardar el MAC en user_data)
+      lv_obj_t *btn = (lv_obj_t*)lv_event_get_target(e);
+      lv_obj_t *lbl = lv_obj_get_child(btn, 0);
+      String line = lv_label_get_text(lbl);
+
+      // extraer algo único; acá buscamos por MAC/nombre exacto:
+      // para simplificar, volvemos a abrir la lista y usamos el índice directo por posición
+      // (si querés exactitud 100%, guarda el MAC en user_data)
+      size_t idx_click = lv_obj_get_index(btn); // posición visual
+      // mapear posición visual a índice real actual:
+      int real_idx = -1;
+
+      // snapshot actual
+      std::vector<DiscoveredSensor> snap2;
+      portENTER_CRITICAL(&sensors_mux);
+      snap2 = sensors;
+      portEXIT_CRITICAL(&sensors_mux);
+
+      // contar visibles de nuevo y elegir el idx_click‑ésimo
+      int count_vis = 0;
+      for (size_t k=0;k<snap2.size();++k){
+        if (millis() - snap2[k].lastSeen > SENSOR_STALE_MS) continue;
+        if (count_vis == (int)idx_click) { real_idx = (int)k; break; }
+        count_vis++;
+      }
+      if (real_idx >= 0) open_name_screen((size_t)real_idx);
     }, LV_EVENT_CLICKED, NULL);
 
     shown++;
   }
 
   if (shown == 0) {
-    // Mensaje de búsqueda continua
     lv_obj_t * lbl = lv_label_create(sensor_list_container);
     lv_label_set_text(lbl, "Buscando sensores...\nAsegurate de que esten transmitiendo.");
     lv_obj_center(lbl);
@@ -1134,15 +1175,6 @@ static void sensor_scan_timer_cb(lv_timer_t * t) {
     return;
   }
   populate_sensor_list();
-}
-
-// Botón volver: regresar al menú de configuración
-static void sensor_back_btn_cb(lv_event_t * e) {
-  LV_UNUSED(e);
-  if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
-  if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
-  sensor_list_container = nullptr;
-  lv_create_config_menu();
 }
 
 // ---- Teclado estilo Wi‑Fi (Shift ↑ NO escribe en el textarea) ----
@@ -1367,7 +1399,7 @@ static void update_nav_arrows_pages() {
     lv_obj_add_event_cb(btn_prev, [](lv_event_t *){
       last_user_nav_ms = millis();
       go_to_page(g_curr_page - 1, false);
-    }, LV_EVENT_CLICKED, NULL);
+    }, LV_EVENT_PRESSED, NULL);
     lv_obj_t *lbl = lv_label_create(btn_prev);
     lv_label_set_text(lbl, LV_SYMBOL_LEFT);
     lv_obj_center(lbl);
@@ -1380,7 +1412,7 @@ static void update_nav_arrows_pages() {
     lv_obj_add_event_cb(btn_next, [](lv_event_t *){
       last_user_nav_ms = millis();
       go_to_page(g_curr_page + 1, false);
-    }, LV_EVENT_CLICKED, NULL);
+    }, LV_EVENT_PRESSED, NULL);
     lv_obj_t *lbl = lv_label_create(btn_next);
     lv_label_set_text(lbl, LV_SYMBOL_RIGHT);
     lv_obj_center(lbl);
@@ -1492,4 +1524,354 @@ static void sensor_timer_cb(lv_timer_t * timer) {
     buzzer_muted = false;
     digitalWrite(BUZZER_PIN, LOW);
   }
+}
+
+// === REEMPLAZO: read_cb sin SPI ===
+void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
+  LV_UNUSED(indev);
+
+  static bool     pressed_prev   = false;
+  static uint32_t pressed_since  = 0;     // <-- sólo marca inicio de una pulsación
+  static int16_t  last_x = 0, last_y = 0;
+
+  // Ventanas de tiempo
+  const uint32_t HOLD_TO_RELEASE_MS = 30;   // suaviza el “soltar”
+  const uint32_t SAFETY_UP_MS       = 350;  // fuerza soltar si se “pega”
+
+  // Copia atómica del último sample del task
+  TouchSample s;
+  portENTER_CRITICAL(&g_touch_mux);
+  s = g_touch_last;
+  portEXIT_CRITICAL(&g_touch_mux);
+
+  uint32_t now = millis();
+  bool pressed = s.pressed;
+  int16_t rx = s.x, ry = s.y;
+
+  // transiciones
+  if (pressed && !pressed_prev) {
+    // recién apretó: arrancamos cronómetro
+    pressed_since = now;
+  } else if (!pressed && pressed_prev) {
+    // recién soltó: limpiamos cronómetro
+    pressed_since = 0;
+  }
+
+  // 1) “release hold” cortito para suavizar soltadas reales
+  if (!pressed && pressed_prev && (now - pressed_since) <= HOLD_TO_RELEASE_MS && pressed_since != 0) {
+    pressed = true;         // mantenemos PRESSED un ratito más
+    rx = last_x; ry = last_y;
+  }
+
+  // 2) SAFETY RELEASE: si lleva mucho apretado continuo, forzamos un RELEASE
+  if (pressed && pressed_since != 0 && (now - pressed_since) > SAFETY_UP_MS) {
+    // Emitimos UN ciclo de RELEASE para destrabar el UI
+    data->state   = LV_INDEV_STATE_RELEASED;
+    data->point.x = last_x;
+    data->point.y = last_y;
+
+    // Limpiamos el estado compartido para cortar la “pulsación eterna”
+    force_release_touch();
+
+    // Simulamos que quedó suelto tras este frame
+    pressed_prev  = false;
+    pressed_since = 0;
+    return;
+  }
+
+  // 3) Flujo normal
+  if (pressed) {
+    data->state   = LV_INDEV_STATE_PRESSED;
+    data->point.x = rx;
+    data->point.y = ry;
+    last_x = rx; last_y = ry;
+    if (alert_active) { buzzer_muted = true; digitalWrite(BUZZER_PIN, LOW); }
+  } else {
+    data->state   = LV_INDEV_STATE_RELEASED;
+    data->point.x = last_x;
+    data->point.y = last_y;
+  }
+
+  pressed_prev = pressed;
+}
+
+static void touch_task(void *){
+  pinMode(XPT2046_IRQ, INPUT_PULLUP);
+  for(;;){
+    //bool raw_pressed = touchscreen.tirqTouched() || touchscreen.touched();
+    bool raw_pressed = (digitalRead(XPT2046_IRQ) == LOW);  // <<-- más rápido, sin SPI
+
+    if (raw_pressed) {
+      int xs[TS_SAMPLES], ys[TS_SAMPLES], n=0;
+
+      for (int i=0;i<TS_SAMPLES;++i){
+        TS_Point p = touchscreen.getPoint();
+        float ax=0.001f, bx=-0.130f, dx=498.426f;
+        float ay=-0.087f, by=0.001f,  dy=339.434f;
+        int x = (int)(ay * p.x + by * p.y + dy);
+        int y = (int)(ax * p.x + bx * p.y + dx);
+        xs[n] = clamp16(x, 0, SCREEN_WIDTH  - 1);
+        ys[n] = clamp16(y, 0, SCREEN_HEIGHT - 1);
+        n++;
+        ets_delay_us(150);
+      }
+
+      int xmin=xs[0], xmax=xs[0], ymin=ys[0], ymax=ys[0];
+      for(int i=1;i<n;i++){ if(xs[i]<xmin)xmin=xs[i]; if(xs[i]>xmax)xmax=xs[i]; if(ys[i]<ymin)ymin=ys[i]; if(ys[i]>ymax)ymax=ys[i]; }
+      bool ok = ((xmax-xmin)<=TS_MAX_JITTER) && ((ymax-ymin)<=TS_MAX_JITTER);
+
+      if (ok){
+        int x_med = median_small(xs, n);
+        int y_med = median_small(ys, n);
+        portENTER_CRITICAL(&g_touch_mux);
+        g_touch_last.x = (int16_t)x_med;
+        g_touch_last.y = (int16_t)y_med;
+        g_touch_last.pressed = true;
+        g_touch_last.ts = millis();
+        portEXIT_CRITICAL(&g_touch_mux);
+      } else {
+        portENTER_CRITICAL(&g_touch_mux);
+        g_touch_last.pressed = false;     // mantené x/y previos
+        g_touch_last.ts = millis();
+        portEXIT_CRITICAL(&g_touch_mux);
+      }
+      vTaskDelay(pdMS_TO_TICKS(1));
+    } else {
+      portENTER_CRITICAL(&g_touch_mux);
+      g_touch_last.pressed = false;
+      g_touch_last.ts = millis();
+      portEXIT_CRITICAL(&g_touch_mux);
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+  }
+}
+
+static void create_alert_bars() {
+  if (alert_top) return;
+
+  lv_obj_t *top_layer = lv_layer_top();
+
+  auto mkbar = [&](lv_obj_t **out) {
+    *out = lv_obj_create(top_layer);
+    lv_obj_remove_style_all(*out);
+    lv_obj_set_style_bg_opa(*out, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(*out, lv_palette_main(LV_PALETTE_RED), 0);
+
+    // No layout, no clickable, arranca oculto
+    lv_obj_add_flag(*out, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_clear_flag(*out, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(*out, LV_OBJ_FLAG_HIDDEN);
+
+    // ► Clave: nunca participar del hit-test (LVGL 8/9)
+    lv_obj_add_flag(*out, LV_OBJ_FLAG_ADV_HITTEST);
+    lv_obj_add_event_cb(*out, [](lv_event_t * e){
+      if (lv_event_get_code(e) == LV_EVENT_HIT_TEST) {
+        lv_hit_test_info_t *info = (lv_hit_test_info_t *)lv_event_get_param(e);
+        info->res = false;  // nunca “tocado”
+      }
+    }, LV_EVENT_HIT_TEST, NULL);
+  };
+
+  mkbar(&alert_top);
+  lv_obj_set_size(alert_top, lv_pct(100), ALERT_THICKNESS);
+  lv_obj_align(alert_top, LV_ALIGN_TOP_MID, 0, 0);
+
+  mkbar(&alert_bottom);
+  lv_obj_set_size(alert_bottom, lv_pct(100), ALERT_THICKNESS);
+  lv_obj_align(alert_bottom, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+  mkbar(&alert_left);
+  lv_obj_set_size(alert_left, ALERT_THICKNESS, lv_pct(100));
+  lv_obj_align(alert_left, LV_ALIGN_LEFT_MID, 0, 0);
+
+  mkbar(&alert_right);
+  lv_obj_set_size(alert_right, ALERT_THICKNESS, lv_pct(100));
+  lv_obj_align(alert_right, LV_ALIGN_RIGHT_MID, 0, 0);
+}
+
+static inline void hide_alert_bars() {
+  if (!alert_top) return;
+  lv_obj_add_flag(alert_top,    LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(alert_bottom, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(alert_left,   LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(alert_right,  LV_OBJ_FLAG_HIDDEN);
+}
+
+static inline void show_alert_bars() {
+  if (!alert_top) return;
+  lv_obj_clear_flag(alert_top,    LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(alert_bottom, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(alert_left,   LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(alert_right,  LV_OBJ_FLAG_HIDDEN);
+}
+
+// Volver a la pantalla principal (desde Settings)
+static void cb_back_to_main(lv_event_t * e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  lv_obj_add_state((lv_obj_t*)lv_event_get_target(e), LV_STATE_DISABLED);
+  force_release_touch();
+  lv_async_call([](void *) {
+    in_settings = false;
+    lv_scr_load(main_screen);
+    pause_main_timers(false);
+    if (alert_active) show_alert_bars(); else hide_alert_bars();
+    // ► reanudar ESP-NOW
+    espnow_start();
+  }, NULL);
+}
+
+// Volver a Settings (desde submenús como Wi‑Fi)
+static void cb_back_to_settings(lv_event_t * e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  lv_obj_add_state((lv_obj_t*)lv_event_get_target(e), LV_STATE_DISABLED);
+  force_release_touch();
+  // limpiar resultados del último scan
+  WiFi.scanDelete();
+  // ► reanudar ESP-NOW al volver al menú
+  espnow_start();
+  lv_async_call([](void *) {
+    lv_create_config_menu();
+  }, NULL);
+}
+
+// Volver a Settings desde la lista de sensores
+static void cb_sensor_back(lv_event_t * e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  lv_obj_add_state((lv_obj_t*)lv_event_get_target(e), LV_STATE_DISABLED);
+  force_release_touch();
+  if (sensor_scan_timer) { lv_timer_del(sensor_scan_timer); sensor_scan_timer = nullptr; }
+  if (sensor_list_screen) { lv_obj_del(sensor_list_screen); sensor_list_screen = nullptr; }
+  sensor_list_container = nullptr;
+  // (No hace falta parar ESP-NOW aquí, no lo tocamos en esta pantalla)
+  lv_async_call([](void *) {
+    lv_create_config_menu();
+  }, NULL);
+}
+
+static inline void force_release_touch() {
+  // Libera al indev de LVGL
+  lv_indev_reset(NULL, NULL);
+  // Limpia el último sample de nuestra tarea táctil
+  portENTER_CRITICAL(&g_touch_mux);
+  g_touch_last.pressed = false;
+  g_touch_last.ts = millis();
+  portEXIT_CRITICAL(&g_touch_mux);
+}
+
+static void espnow_start() {
+  if (espnow_running) return;
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() == ESP_OK) {
+    esp_now_register_recv_cb(on_espnow_recv);
+    espnow_running = true;
+    Serial.println("[ESP-NOW] start");
+  } else {
+    Serial.println("[ESP-NOW] init FAILED");
+  }
+}
+
+static void espnow_stop() {
+  if (!espnow_running) return;
+  esp_now_deinit();
+  espnow_running = false;
+  Serial.println("[ESP-NOW] stop");
+}
+
+// ====== HORA / RTC ======
+static bool rtc_has_valid_time() {
+  struct tm t;
+  if (!getLocalTime(&t, 100)) return false;
+  // tm_year es años desde 1900; si es < 120 (~2020) probablemente no hay NTP
+  return (t.tm_year >= 120);
+}
+
+// Bloquea hasta que SNTP actualice (con tope de tiempo)
+static bool wait_time_sync(uint32_t timeout_ms) {
+  uint32_t start = millis();
+  struct tm t;
+  while (millis() - start < timeout_ms) {
+    if (getLocalTime(&t, 50) && t.tm_year >= 120) return true;
+    delay(100);
+  }
+  return false;
+}
+
+// Sincroniza hora via Wi-Fi y deja la hora en RTC; luego apaga Wi-Fi y vuelve a ESP-NOW
+static bool sync_time_via_wifi(const String& ssid, const String& pass) {
+  Serial.println("[TIME] Iniciando sync NTP...");
+
+  // Pausar ESP-NOW (libera el radio para el scan/assoc)
+  espnow_stop();
+
+  // Modo STA limpio
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(50);
+
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  // Esperar conexión (máx ~10s)
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+    delay(200);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[TIME] No se pudo conectar al Wi-Fi para NTP");
+    // Dejamos Wi-Fi OFF y reanudamos ESP-NOW
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    espnow_start();
+    return false;
+  }
+  
+  // Limpia cualquier TZ previa para que no interfiera
+  setenv("TZ", "UTC0", 1);
+  tzset();
+
+  // Configurar zona horaria + servidores NTP y esperar sync
+  // (Ajustá tu TZ si hace falta; estabas usando "GMT+3")
+  //configTzTime("America/Argentina/Buenos_Aires", "pool.ntp.org", "time.nist.gov");
+  configTime(-3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+  bool ok = wait_time_sync(8000);  // esperar hasta 8s
+
+  if (ok) {
+    struct tm now;
+    getLocalTime(&now, 200);
+    char buf[40];
+    strftime(buf, sizeof(buf), "%d/%m/%Y %H:%M:%S", &now);
+    Serial.printf("[TIME] NTP OK -> %s\n", buf);
+  } else {
+    Serial.println("[TIME] NTP timeout (no se actualizó la hora)");
+  }
+
+  // Cortar Wi-Fi para liberar el radio y ahorrar
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+
+  // Volver a ESP-NOW (en STA sin asociar)
+  espnow_start();
+
+  return ok;
+}
+
+static void ensure_sta_for_scan() {
+  // Dejar STA encendida y limpia, pero sin asociar
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true /*apagar/limpiar*/, true /*borrar cred*/);
+  delay(50);
+
+  // Asegurar que no quedó nada “raro” del uso previo de ESP-NOW
+  esp_wifi_set_promiscuous(false);
+
+  // País: Argentina (canales 1-13). Evita que falten redes en 12/13.
+  wifi_country_t AR = { "AR", 1, 13, WIFI_COUNTRY_POLICY_AUTO };
+  esp_wifi_set_country(&AR);
+
+  // “Soft restart” del driver (muy efectivo tras ESP-NOW)
+  esp_wifi_stop();
+  esp_wifi_start();
+  delay(50);
 }
