@@ -10,15 +10,38 @@
 #include <DHT.h>
 #include <MQ7.h>
 #include <esp_wifi.h>
-
-// ===== NEW: FreeRTOS ====
+#include <UrlEncode.h>
+#include <HTTPClient.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// =================== TUS GLOBALES ===================
+// =================== GLOBALES ===================
 static lv_display_t *g_disp = nullptr;
 static lv_coord_t SW = 0, SH = 0;
 static int g_curr_page = 0;
+
+String phoneNumber = ""; // numero de telefono con prefijo internacional
+String apiKey = ""; // API Key de CallMeBot
+
+static const float CO_HIGH_TH  = 30.0f;   // umbral de prueba
+static const float CO_RESET_TH = 25.0f;   // histeresis
+static bool   wa_alert_sent = false;
+static uint32_t wa_last_sent_ms = 0;
+static uint32_t wa_cooldown_ms = 15UL * 1000UL; // 15 segundos entre mensajes
+
+// ---- Reglas de activación según tabla de Enargas ----
+// Tiempos en milisegundos
+static const uint32_t CO_30_MIN_MS   = 120UL * 60UL * 1000UL; // 120 min (30 ppm)
+static const uint32_t CO_50_MIN_MS   =  60UL * 60UL * 1000UL; //  60 min (no se usa para disparo)
+static const uint32_t CO_50_MAX_MS   =  90UL * 60UL * 1000UL; //  90 min
+static const uint32_t CO_100_MIN_MS  =  10UL * 60UL * 1000UL; //  10 min (no se usa para disparo)
+static const uint32_t CO_100_MAX_MS  =  40UL * 60UL * 1000UL; //  40 min
+static const uint32_t CO_300_MAX_MS  =   3UL * 60UL * 1000UL; //   3 min
+
+// Histéresis / reset de alarma
+static const float    ALARM_HOLD_PPM      = 50.0f;     // mantener activa por encima de 50 ppm
+static const float    ALARM_RESET_PPM     = 45.0f;     // liberar cuando baja de 45 ppm
+static const uint32_t ALARM_RESET_HOLD_MS = 2UL * 60UL * 1000UL; // 2 min continuos <45 ppm
 
 // Intervalos
 #define UI_REFRESH_MS        300
@@ -174,6 +197,10 @@ static bool rtc_has_valid_time();
 static bool wait_time_sync(uint32_t timeout_ms);
 static bool sync_time_via_wifi(const String& ssid, const String& pass);
 static void ensure_sta_for_scan();
+static bool wifi_connect_temporal(const String& ssid, const String& pass, uint32_t timeout_ms = 12000);
+static void wifi_disconnect_temporal();
+static bool send_whatsapp_callmebot(const String& phone, const String& apiKey, const String& message);
+static bool update_co_alarm(float ppm, uint32_t now_ms);
 
 static void refresh_ui_now();
 static void set_selected_sensor(int idx);
@@ -211,7 +238,7 @@ static volatile bool g_need_page_sync = false;
 static lv_obj_t *alert_overlay = nullptr;
 static float last_local_t = NAN, last_local_h = NAN, last_local_co = NAN;
 static lv_obj_t *alert_top = nullptr, *alert_bottom = nullptr, *alert_left = nullptr, *alert_right = nullptr;
-#define ALERT_THICKNESS  6   // <- grosor del marco (ajustable)
+#define ALERT_THICKNESS  6   // grosor del marco (ajustable)
 static bool espnow_running = false;
 
 static uint32_t nav_quiet_until = 0;
@@ -385,21 +412,7 @@ void lv_create_main_gui(void) {
   lv_obj_set_style_pad_row(pages, 0, 0);
   lv_obj_set_style_pad_column(pages, 0, 0);
   lv_obj_set_flex_flow(pages, LV_FLEX_FLOW_ROW);
-/*
-  if (!alert_overlay) {
-  alert_overlay = lv_obj_create(lv_screen_active());
-  lv_obj_set_size(alert_overlay, SW, SH);
-  lv_obj_align(alert_overlay, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_set_style_bg_opa(alert_overlay, LV_OPA_TRANSP, 0);   // sin fondo
-  lv_obj_set_style_border_width(alert_overlay, 4, 0);
-  lv_obj_set_style_border_color(alert_overlay, lv_palette_main(LV_PALETTE_RED), 0);
-  lv_obj_set_style_shadow_width(alert_overlay, 0, 0);
-  //lv_obj_add_flag(alert_overlay, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_flag(alert_overlay, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_obj_add_flag(alert_overlay, LV_OBJ_FLAG_HIDDEN);          // empieza oculto
-  lv_obj_move_foreground(alert_overlay);
-}
-*/
+
   if (!alert_top) create_alert_bars();
 
   lv_obj_set_scrollbar_mode(pages, LV_SCROLLBAR_MODE_OFF);
@@ -595,7 +608,7 @@ void lv_create_splash_screen() {
   splash_timer = lv_timer_create([](lv_timer_t * timer) {
     lv_obj_clean(lv_screen_active());
     lv_create_main_gui();
-    main_screen = lv_screen_active();    // <-- AHORA sí guardamos la pantalla principal
+    main_screen = lv_screen_active();
     lv_timer_del(timer);
   }, 1000, NULL);
 }
@@ -629,7 +642,7 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
   int shown = 0;
   for (int i = 0; i < n && shown < max_items; ++i) {
     String ssid = WiFi.SSID(i);
-    if (ssid.length() == 0) continue;     // ignora ocultas/vacías si no querés listarlas
+    if (ssid.length() == 0) continue;
 
     availableSSIDs.push_back(ssid);
 
@@ -652,7 +665,6 @@ void scan_and_show_wifi_list(lv_obj_t * parent, int max_items) {
     shown++;
   }
 
-  // deja los resultados cacheados por si volvés a esta pantalla sin re-escanear
   lv_obj_scroll_to_y(parent, 0, LV_ANIM_OFF);
 }
 
@@ -696,11 +708,13 @@ void show_wifi_keyboard(const char * ssid) {
 void connect_to_wifi(String ssid, String password) {
   lv_obj_clean(lv_screen_active());
 
+  wifi_ssid = ssid;
+  wifi_password = password;
+
   lv_obj_t * label = lv_label_create(lv_screen_active());
   lv_label_set_text(label, "Sincronizando hora...");
   lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
-  // Hacemos la sync (bloqueante pero corta)
   bool ok = sync_time_via_wifi(ssid, password);
 
   if (ok) {
@@ -863,7 +877,6 @@ void lv_create_wifi_menu() {
         esp_wifi_stop(); esp_wifi_start(); delay(50);
         // Reintento con mismos parámetros
         WiFi.scanNetworks(true, false, true, 200);
-        // Mostramos “reintentando...”
         lv_obj_t * lbl = lv_label_create(parent_list);
         lv_label_set_text(lbl, "Reintentando escaneo...");
         lv_obj_center(lbl);
@@ -935,7 +948,6 @@ static void on_espnow_recv(const uint8_t *mac, const uint8_t *incomingData, int 
   g_need_page_sync = true;   // pedir a la UI que sincronice páginas
 }
 
-// (opcional) para debugging canal WiFi
 static int wifi_channel() {
   wifi_second_chan_t sc;
   uint8_t ch = 0;
@@ -1135,7 +1147,6 @@ static void populate_sensor_list() {
 
       // extraer algo único; acá buscamos por MAC/nombre exacto:
       // para simplificar, volvemos a abrir la lista y usamos el índice directo por posición
-      // (si querés exactitud 100%, guarda el MAC en user_data)
       size_t idx_click = lv_obj_get_index(btn); // posición visual
       // mapear posición visual a índice real actual:
       int real_idx = -1;
@@ -1166,7 +1177,7 @@ static void populate_sensor_list() {
   }
 }
 
-// Timer que repuebla la lista (para “seguir buscando”)
+// Timer para refrescar la lista de sensores cada 2s
 static void sensor_scan_timer_cb(lv_timer_t * t) {
   LV_UNUSED(t);
   // Si el usuario salió de la pantalla, frenamos
@@ -1275,7 +1286,6 @@ static void set_selected_sensor(int idx) {
     refresh_ui_now();
     return;
   }
-  // wrap-around
   if (idx < 0) idx = (int)sensors.size() - 1;
   if (idx >= (int)sensors.size()) idx = 0;
 
@@ -1423,7 +1433,6 @@ static void update_nav_arrows_pages() {
 }
 
 static float mq7_adc_to_ppm(int raw) {
-  // *** Placeholder simple ***
   // Ajustá con tu calibración: curva o tabla real del MQ7.
   // Por ahora, mapeo lineal aproximado 0..4095 -> 0..500 ppm
   return (float)raw * (500.0f / 4095.0f);
@@ -1505,33 +1514,90 @@ static lv_obj_t * make_back_button(lv_obj_t *parent, lv_align_t align, lv_coord_
 
 static void sensor_timer_cb(lv_timer_t * timer) {
   LV_UNUSED(timer);
-  // Solo leer hardware y actualizar variables globales (local_t, local_h, local_co).
+
+  // 1) Leer sensores y actualizar variables globales
   read_local_sensors();
 
-  // Si querés, podés actualizar acá el estado de alerta (depende de local_co).
-  float ppm = isnan(local_co) ? 0.0f : local_co;
-  if (ppm > 100.0f) {
-    if (!alert_active) buzzer_muted = false;
-    alert_active = true;
-  } else if (ppm > 10.0f) {
-    alert_active = false;
-    alert_blink_state = false;
-    buzzer_muted = false;
-    digitalWrite(BUZZER_PIN, LOW);
+  // 2) Lógica de alarmas conforme a la tabla de Enargas
+  const float ppm_local = isnan(local_co) ? 0.0f : local_co;
+  const uint32_t now = millis();
+  const bool should_alarm = update_co_alarm(ppm_local, now);
+
+  // 3) Acciones visual/sonora existentes
+  alert_active = should_alarm;
+  if (alert_active) {
+    if (!buzzer_muted) digitalWrite(BUZZER_PIN, HIGH);
   } else {
-    alert_active = false;
-    alert_blink_state = false;
     buzzer_muted = false;
     digitalWrite(BUZZER_PIN, LOW);
   }
-}
 
-// === REEMPLAZO: read_cb sin SPI ===
+  // Anti-spam / histeresis
+  uint32_t now = millis();
+  bool cooldown_ok = (now - wa_last_sent_ms) > wa_cooldown_ms;
+
+  if (wa_alert_sent && ppm_local < CO_RESET_TH) {
+    Serial.printf("[WA] Rearma: LOCAL_CO=%.1f < RESET(%.1f)\n", ppm_local, CO_RESET_TH);
+    wa_alert_sent = false;
+  }
+
+  if (ppm_local <= CO_HIGH_TH) {
+    Serial.printf("[WA] Aún bajo: LOCAL_CO=%.1f <= HIGH(%.1f)\n", ppm_local, CO_HIGH_TH);
+    return;
+  }
+
+  Serial.printf("[WA] Sobre umbral: LOCAL_CO=%.1f > HIGH(%.1f) sent=%d cooldown_ok=%d elapsed=%lu ms\n",
+                ppm_local, CO_HIGH_TH, wa_alert_sent ? 1 : 0, cooldown_ok ? 1 : 0,
+                (unsigned long)(now - wa_last_sent_ms));
+
+  if (wa_alert_sent) {
+    Serial.println("[WA] Ya se envió en este ciclo (espera reset por histeresis).");
+    return;
+  }
+  if (!cooldown_ok) {
+    Serial.println("[WA] En cooldown; no se envía todavía.");
+    return;
+  }
+
+  if (wifi_ssid.length() == 0) {
+    Serial.println("[WA] SSID vacío: primero conectá por el menú Wi-Fi (NTP) para guardar credenciales.");
+    return;
+  }
+
+  // Conexión Wi-Fi temporal
+  Serial.printf("[WA] Intentando conectar SSID='%s'...\n", wifi_ssid.c_str());
+  bool connected = wifi_connect_temporal(wifi_ssid, wifi_password, 15000);
+  Serial.printf("[WA] wifi_connect_temporal -> %s (status=%d, ip=%s)\n",
+                connected ? "OK" : "FAIL",
+                (int)WiFi.status(),
+                WiFi.localIP().toString().c_str());
+
+  if (!connected) {
+    Serial.println("[WA] No se pudo conectar a Wi-Fi para enviar.");
+    return;
+  }
+
+  String msg = "Monoxido detectado en el domicilio de Joaquin Serra - "
+               + String((int)ppm_local) + " ppm - " + get_formatted_datetime();
+
+  bool ok = send_whatsapp_callmebot(phoneNumber, apiKey, msg);
+
+  wifi_disconnect_temporal();
+
+  if (ok) {
+    wa_alert_sent   = true;
+    wa_last_sent_ms = now;
+    Serial.println("[WA] Envío OK -> wa_alert_sent=1; inicia cooldown.");
+  } else {
+    Serial.println("[WA] Envío FALLÓ (ver HTTP code/payload arriba).");
+  }
+} 
+
 void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
   LV_UNUSED(indev);
 
   static bool     pressed_prev   = false;
-  static uint32_t pressed_since  = 0;     // <-- sólo marca inicio de una pulsación
+  static uint32_t pressed_since  = 0;     // sólo marca inicio de una pulsación
   static int16_t  last_x = 0, last_y = 0;
 
   // Ventanas de tiempo
@@ -1550,27 +1616,27 @@ void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
 
   // transiciones
   if (pressed && !pressed_prev) {
-    // recién apretó: arrancamos cronómetro
+    // arrancamos cronómetro
     pressed_since = now;
   } else if (!pressed && pressed_prev) {
-    // recién soltó: limpiamos cronómetro
+    // reiniciamos cronómetro
     pressed_since = 0;
   }
 
-  // 1) “release hold” cortito para suavizar soltadas reales
+  // 1) release hold
   if (!pressed && pressed_prev && (now - pressed_since) <= HOLD_TO_RELEASE_MS && pressed_since != 0) {
-    pressed = true;         // mantenemos PRESSED un ratito más
+    pressed = true;         // mantenemos PRESSED
     rx = last_x; ry = last_y;
   }
 
-  // 2) SAFETY RELEASE: si lleva mucho apretado continuo, forzamos un RELEASE
+  // 2) si lleva mucho apretado continuo, forzamos un RELEASE
   if (pressed && pressed_since != 0 && (now - pressed_since) > SAFETY_UP_MS) {
     // Emitimos UN ciclo de RELEASE para destrabar el UI
     data->state   = LV_INDEV_STATE_RELEASED;
     data->point.x = last_x;
     data->point.y = last_y;
 
-    // Limpiamos el estado compartido para cortar la “pulsación eterna”
+    // Limpiamos el estado compartido para cortar la pulsación
     force_release_touch();
 
     // Simulamos que quedó suelto tras este frame
@@ -1598,8 +1664,7 @@ void touchscreen_read(lv_indev_t * indev, lv_indev_data_t * data) {
 static void touch_task(void *){
   pinMode(XPT2046_IRQ, INPUT_PULLUP);
   for(;;){
-    //bool raw_pressed = touchscreen.tirqTouched() || touchscreen.touched();
-    bool raw_pressed = (digitalRead(XPT2046_IRQ) == LOW);  // <<-- más rápido, sin SPI
+    bool raw_pressed = (digitalRead(XPT2046_IRQ) == LOW);
 
     if (raw_pressed) {
       int xs[TS_SAMPLES], ys[TS_SAMPLES], n=0;
@@ -1631,7 +1696,7 @@ static void touch_task(void *){
         portEXIT_CRITICAL(&g_touch_mux);
       } else {
         portENTER_CRITICAL(&g_touch_mux);
-        g_touch_last.pressed = false;     // mantené x/y previos
+        g_touch_last.pressed = false; 
         g_touch_last.ts = millis();
         portEXIT_CRITICAL(&g_touch_mux);
       }
@@ -1781,7 +1846,6 @@ static void espnow_stop() {
 static bool rtc_has_valid_time() {
   struct tm t;
   if (!getLocalTime(&t, 100)) return false;
-  // tm_year es años desde 1900; si es < 120 (~2020) probablemente no hay NTP
   return (t.tm_year >= 120);
 }
 
@@ -1827,10 +1891,6 @@ static bool sync_time_via_wifi(const String& ssid, const String& pass) {
   // Limpia cualquier TZ previa para que no interfiera
   setenv("TZ", "UTC0", 1);
   tzset();
-
-  // Configurar zona horaria + servidores NTP y esperar sync
-  // (Ajustá tu TZ si hace falta; estabas usando "GMT+3")
-  //configTzTime("America/Argentina/Buenos_Aires", "pool.ntp.org", "time.nist.gov");
   configTime(-3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
 
   bool ok = wait_time_sync(8000);  // esperar hasta 8s
@@ -1860,18 +1920,148 @@ static void ensure_sta_for_scan() {
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true /*apagar/limpiar*/, true /*borrar cred*/);
+  WiFi.disconnect(true, true);
   delay(50);
 
-  // Asegurar que no quedó nada “raro” del uso previo de ESP-NOW
   esp_wifi_set_promiscuous(false);
 
   // País: Argentina (canales 1-13). Evita que falten redes en 12/13.
   wifi_country_t AR = { "AR", 1, 13, WIFI_COUNTRY_POLICY_AUTO };
   esp_wifi_set_country(&AR);
 
-  // “Soft restart” del driver (muy efectivo tras ESP-NOW)
+  // “Soft restart” del driver
   esp_wifi_stop();
   esp_wifi_start();
   delay(50);
+}
+
+// Conexión Wi-Fi temporal sin NTP (reutiliza tu lógica de pausa/reanudación de ESP-NOW)
+static bool wifi_connect_temporal(const String& ssid, const String& pass, uint32_t timeout_ms) {
+  espnow_stop();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(50);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < timeout_ms) {
+    delay(200);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WA] No se pudo conectar al Wi-Fi");
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    espnow_start();
+    return false;
+  }
+  return true;
+}
+
+static void wifi_disconnect_temporal() {
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  espnow_start();
+}
+
+// Enviar WhatsApp vía CallMeBot
+static bool send_whatsapp_callmebot(const String& phone, const String& apiKey, const String& message) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WA] WiFi no conectado, no se puede enviar.");
+    return false;
+  }
+
+  String url = "http://api.callmebot.com/whatsapp.php?phone=" 
+               + urlEncode(phone) 
+               + "&text=" + urlEncode(message) 
+               + "&apikey=" + urlEncode(apiKey);
+
+  Serial.print("[WA] URL: ");
+  Serial.println(url);
+
+  HTTPClient http;
+  if (!http.begin(url)) {
+    Serial.println("[WA] http.begin() falló");
+    return false;
+  }
+
+  int code = http.GET();
+  Serial.print("[WA] HTTP code: ");
+  Serial.println(code);
+
+  if (code > 0) {
+    String payload = http.getString();
+    Serial.print("[WA] Payload: ");
+    Serial.println(payload);
+  } else {
+    Serial.print("[WA] Error en GET, code=");
+    Serial.println(code);
+  }
+
+  http.end();
+  return (code == 200);
+}
+
+// Devuelve true cuando debe activarse la alarma de acuerdo a la tabla.
+// Mantiene/gestiona estados internos (tiempo en banda, reset, etc.).
+static bool update_co_alarm(float ppm, uint32_t now_ms) {
+  enum Band { BAND_NONE=0, BAND_30, BAND_50, BAND_100, BAND_300 };
+  static Band     curr_band = BAND_NONE;
+  static uint32_t band_start_ms = 0;
+  static uint32_t below_reset_start_ms = 0;
+  static bool     alarm_latched = false;
+
+  // 1) Determinar banda actual
+  Band new_band = BAND_NONE;
+  if      (ppm >= 300.0f) new_band = BAND_300;
+  else if (ppm >= 100.0f) new_band = BAND_100;
+  else if (ppm >=  50.0f) new_band = BAND_50;
+  else if (ppm >=  30.0f) new_band = BAND_30;
+  else                    new_band = BAND_NONE;
+
+  // 2) Cambio de banda → reiniciar cronómetro de exposición
+  if (new_band != curr_band) {
+    curr_band = new_band;
+    band_start_ms = now_ms;
+  }
+
+  // 3) Latch de alarma mientras CO > 50 ppm
+  if (alarm_latched) {
+    if (ppm > ALARM_HOLD_PPM) {
+      below_reset_start_ms = 0; // seguimos altos, nada que resetear
+      return true;
+    }
+    // por debajo de 50 → esperamos que baje de la histéresis y se mantenga un tiempo
+    if (ppm < ALARM_RESET_PPM) {
+      if (below_reset_start_ms == 0) below_reset_start_ms = now_ms;
+      if ((now_ms - below_reset_start_ms) >= ALARM_RESET_HOLD_MS) {
+        alarm_latched = false;           // liberar alarma
+        below_reset_start_ms = 0;
+      }
+    } else {
+      below_reset_start_ms = 0;
+    }
+    return alarm_latched;
+  }
+
+  // 4) Aún no latcheada: evaluar reglas de activación por banda
+  uint32_t exp_ms = now_ms - band_start_ms;
+
+  switch (curr_band) {
+    case BAND_300:
+      if (exp_ms >= CO_300_MAX_MS) { alarm_latched = true; return true; }
+      break;
+    case BAND_100:
+      if (exp_ms >= CO_100_MAX_MS) { alarm_latched = true; return true; }
+      break;
+    case BAND_50:
+      if (exp_ms >= CO_50_MAX_MS)  { alarm_latched = true; return true; }
+      break;
+    case BAND_30:
+      if (exp_ms >= CO_30_MIN_MS)  { alarm_latched = true; return true; }
+      break;
+    default:
+      break;
+  }
+
+  return false; // aún no corresponde activar
 }
